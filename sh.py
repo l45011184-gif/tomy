@@ -1064,14 +1064,21 @@ async def _send_as_media(bot, chat_id, emoji_id: str, caption: str,
                 )
                 return  # Success! Break out of the retry loop
             except RetryAfter as exc:
+                if attempt == 3:
+                    raise
                 wait_time = float(getattr(exc, 'retry_after', 3)) + 1
                 logging.warning(f"[MEDIA] Rate limited for chat_id={chat_id}. Sleeping {wait_time}s...")
                 await asyncio.sleep(wait_time)
             except Exception as exc:
                 logging.warning(f"[MEDIA] send_message to {chat_id} failed: {exc}")
-                return # If it's another error, stop trying to avoid infinite loops
+                # If it failed due to reply_to_message_id, try again without it
+                if reply_to_message_id:
+                    reply_to_message_id = None
+                    continue
+                return # If it's another error, stop trying
     except Exception as exc:
         logging.warning(f"[MEDIA] _send_as_media failed for {chat_id}: {exc}")
+        raise # Re-raise so _send_hit knows it failed
 
 def _plan_eid(plan: str) -> str:
     norm = "".join(SPECIAL_FONT_MAP.get(c, c.upper()) for c in (plan or ""))
@@ -1130,7 +1137,7 @@ def _sid() -> str:
 # BIN LOOKUP
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COUNTRY_FLAGS = {
-   
+
 
     "US":"🇺🇸","GB":"🇬🇧","CA":"🇨🇦","AU":"🇦🇺","DE":"🇩🇪","FR":"🇫🇷",
     "IN":"🇮🇳","BR":"🇧🇷","MX":"🇲🇽","JP":"🇯🇵","CN":"🇨🇳","RU":"🇷🇺",
