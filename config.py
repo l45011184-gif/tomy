@@ -15,7 +15,7 @@ from telegram import TelegramObject
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 🔑  BOT CREDENTIALS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8625326240:AAEv7GJyyBTw9la4w-Xwer31ZQ41uwIQvsE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8768705386:AAEZctPbO7LRd0QTcMHhb_UsPjQN4biOeog")
 OWNER_ID  = int(os.environ.get("OWNER_ID", "5502877086"))  # @lucifer2600
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -32,15 +32,20 @@ BOT_LINK      = f"https://t.me/{BOT_USERNAME}"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📢  CHANNEL & GROUP LINKS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CHANNEL_USERNAME = "@Batcardchk"
+CHANNEL_USERNAME = "Batcardchk"
 GROUP_USERNAME   = "@batcardchkGroup"
 
-CHANNEL_LINK  = "https://t.me/Batcardchk"
-GROUP_LINK    = "https://t.me/batcardchkGroup"
-SUPPORT_LINK  = "https://t.me/+Gjwke5Yc1ddhYmZk"
+CHANNEL_LINK     = "https://t.me/Batcardchk"
+LOGS_CHANNEL_LINK = "https://t.me/Batcardchk"
+GROUP_LINK       = "https://t.me/batcardchkGroup"
+SUPPORT_LINK     = "https://t.me/+Gjwke5Yc1ddhYmZk"
 
 _ch_raw    = os.environ.get("CHANNEL_ID", CHANNEL_USERNAME).strip()
-CHANNEL_ID = int(_ch_raw) if _ch_raw.lstrip("-").isdigit() else _ch_raw
+CHANNEL_ID = (
+    int(_ch_raw)
+    if _ch_raw.lstrip("-").isdigit()
+    else _ch_raw if _ch_raw.startswith("@") else f"@{_ch_raw}"
+)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 🔒  FORCE-JOIN CHANNELS & GROUPS
@@ -96,11 +101,11 @@ PREMIUM_GATES: set[str] = {"au", "mss", "mpp2"}
 #     All users see them — even non-Premium accounts.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DECLINED_EMOJI_ID      = "5273914604752216432"
-CARD_EMOJI_ID          = "6104768649409596160"
-USER_EMOJI_ID          = "4958689671950369798"
+DECLINED_EMOJI_ID      = "4956612582816351459"
+CARD_EMOJI_ID          = "5800709991627232190"
+USER_EMOJI_ID          = "6267115986541877538"
 TIME_EMOJI_ID          = "6285240160120477644"
-DEV_EMOJI_ID           = "6271506980716680365"
+DEV_EMOJI_ID           = "6267091732861555879"
 PRO_EMOJI_ID           = "6280484433027931563"
 
 HIT_RESP_EMOJI_ID      = "5839116473951328489"
@@ -108,7 +113,7 @@ HIT_RESP_EMOJI_ID      = "5839116473951328489"
 PROG_GATE_EMOJI_ID     = "5370935802844946281"
 PROG_PROGRESS_EMOJI_ID = "5116268964023894989"
 PROG_LIVE_EMOJI_ID     = "6296367896398399651"   # ← fixed (was same as CHARGED)
-PROG_DEAD_EMOJI_ID     = "6298671811345254603"
+PROG_DEAD_EMOJI_ID     = "4958526153955476488"
 PROG_ERRORS_EMOJI_ID   = "4956611513369494230"
 PROG_CHARGED_EMOJI_ID  = "5427168083074628963"   # 💎 charged
 
@@ -116,8 +121,23 @@ BTN_ALL_EMOJI_ID       = "4956324463525233747"
 BTN_STOP_EMOJI_ID      = "6179444193518162239"
 BTN_CHARGED_EMOJI_ID   = "5465465194056525619"   # 💎 charged button (reference)
 BTN_LIVE_EMOJI_ID      = "5039793437776282663"   # ✅ live button (fixed)
+CARD_CHK_BTN_EMOJI_ID  = "5935795874251674052"
+HIT_GATE_EMOJI_ID      = "5341715473882955310"
 
-LIVE_EMOJI_IDS = [
+SH_GATE_EMOJI_ID       = "6220029508456548253"
+SH_PROG_EMOJI_ID       = "6298691319086712919"
+SH_LIVE_EMOJI_ID       = PROG_LIVE_EMOJI_ID
+
+SC_REPORT_EMOJI_ID     = "5323674506705785412"
+SC_STATS_EMOJI_ID      = "5341715473882955310"
+SC_DUPE_EMOJI_ID       = "5801154993188770160"
+SC_DONE_EMOJI_ID       = "5287777298894835685"
+SC_DENY_EMOJI_ID       = "4956739572114392015"
+ME_CROWN_EMOJI_ID      = "6181649972757271368"
+ME_SMILE_EMOJI_ID      = "6264538349034281099"
+ME_KING_EMOJI_ID       = "6271506980716680365"
+
+CHARGED_EMOJI_IDS = [
     "5801154993188770160", "4956739572114392015", "5285221724634239278",
     "5287777298894835685", "5285024405246725814", "5287547831677112267",
     "5287658362660474522", "5285186510197381130", "5803233241963959320",
@@ -126,10 +146,14 @@ LIVE_EMOJI_IDS = [
     "5891044423856296980", "5436068999068662274", "5427168083074628963",
 ]
 
+LIVE_EMOJI_IDS = [
+    "6296367896398399651",
+]
+
 PLAN_EMOJIS = {
     "CORE":   "5379869575338812919",
     "ELITE":  "5836898273666798437",
-    "ROOT":   "5235611059909323996",
+    "ROOT":   "4956420911310832630",
     "CUSTOM": "5445027583588593750",
 }
 
@@ -151,6 +175,7 @@ def tg_emoji(emoji_id: str, fallback: str = "⭐") -> str:
     Animates for Premium users; shows the fallback glyph for non-Premium users.
     Always use parse_mode='HTML' when sending messages that contain these tags."""
     return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
 
 def get_random_live_emoji() -> str:
     """Return a random live-hit emoji ID (string, not rendered tag)."""
@@ -193,14 +218,13 @@ E_HIT_RESP = tg_emoji(HIT_RESP_EMOJI_ID,      "✅")
 #   Telegram Bot API supports:
 #     "style": "primary"   → blue button
 #     "style": "danger"    → red button
-#     "icon_custom_emoji_id" → animated sticker on button
 #
 #   python-telegram-bot calls .to_dict() on reply_markup,
 #   so this thin wrapper passes raw API JSON straight through.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class RawMarkup(TelegramObject):
-    """Coloured inline keyboard — passes style/icon_custom_emoji_id through PTB's encoder."""
+    """Coloured inline keyboard passed through PTB's encoder."""
     __slots__ = ("_data",)
 
     def __init__(self, inline_keyboard: list):
@@ -216,12 +240,23 @@ class RawMarkup(TelegramObject):
 
 def _btn(text: str, *, cb: str = None, url: str = None,
          style: str = None, icon: str = None) -> dict:
-    """Build one raw Telegram API button dict."""
-    d: dict = {"text": text}
+    """Build one coloured button without custom/live emoji attachments."""
+    text = str(text).lstrip(
+        " \t⚡🔥🔙💎🤖📢📄📋✅❌➕🗑✏️📡📊⭐👤⏱🔄🛒⚠️"
+    ).strip()
+    normalized_text = "".join(SPECIAL_FONT_MAP.get(c, c.upper()) for c in text)
+    if cb in {"hide_on", "hide_off"}:
+        button_style = "success"
+    elif "BACK" in normalized_text:
+        button_style = "primary"
+    else:
+        button_style = style or "danger"
+    d: dict = {
+        "text": text,
+        "style": button_style,
+    }
     if cb:    d["callback_data"]        = cb
     if url:   d["url"]                  = url
-    if style: d["style"]                = style
-    if icon:  d["icon_custom_emoji_id"] = icon
     return d
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
