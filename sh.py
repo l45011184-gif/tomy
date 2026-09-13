@@ -2,7 +2,7 @@
 sh.py  v28  —  /sh single-card + /msh mass Shopify checker
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Framework : python-telegram-bot v21
-API       :https://laxman.up.railway.app/
+API       : https://laxman.up.railway.app/
             GET ?cc=NUM|MM|YY|CVV&site=DOMAIN&proxy=http://ip:port
             site  = plain domain, NO https:// prefix
             proxy = http://ip:port  (WITH http:// prefix)
