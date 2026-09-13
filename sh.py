@@ -88,7 +88,7 @@ from config import (
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-API_URL       = "https://lucifer.up.railway.app/shopii"
+API_URL       = "https://laxman.up.railway.app/"
 BOT_CHANNEL   = CHANNEL_LINK
 DEV_LINK_HTML = f'<a href="{BOT_CHANNEL}">{BOT_NAME}</a>'
 
