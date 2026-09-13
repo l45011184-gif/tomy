@@ -2,7 +2,7 @@
 sh.py  v28  —  /sh single-card + /msh mass Shopify checker
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Framework : python-telegram-bot v21
-API       : https://laxman.up.railway.app/
+API       : https://laxman.up.railway.app/shopii
             GET ?cc=NUM|MM|YY|CVV&site=DOMAIN&proxy=http://ip:port
             site  = plain domain, NO https:// prefix
             proxy = http://ip:port  (WITH http:// prefix)
@@ -88,7 +88,7 @@ from config import (
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-API_URL       = "https://laxman.up.railway.app/"
+API_URL       = "https://laxman.up.railway.app/shopii"
 BOT_CHANNEL   = CHANNEL_LINK
 DEV_LINK_HTML = f'<a href="{BOT_CHANNEL}">{BOT_NAME}</a>'
 
