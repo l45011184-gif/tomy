@@ -49,8 +49,7 @@ from sh import _send_as_media, _get_sticker_fid
 
 HIT_LOG_GROUP_ID          = -1004398328329
 EXTRA_CHARGED_GROUP_ID    = -1003991915326
-STRIPE_GATE_API_URL       = "https://cardx.up.railway.app/stripe/cc={card}"
-
+STRIPE_GATE_API_URL       =  "https://laxman.up.railway.app/stripe/cc={card}"
 MAX_CONCURRENT_CARDS      = 10
 CARD_TIMEOUT_SECONDS      = 300
 PROGRESS_UPDATE_INTERVAL  = 5.0
