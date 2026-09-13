@@ -41,15 +41,16 @@ from config import (
 )
 
 # Shared sticker-animation sender (one cache for both sh.py and mst.py)
-from sh import _send_as_media, _get_sticker_fid
+from sh import _send_as_media, _get_sticker_fid, html_to_entities
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIGURATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-HIT_LOG_GROUP_ID          = -1004398328329
-EXTRA_CHARGED_GROUP_ID    = -1003991915326
-STRIPE_GATE_API_URL       =  "https://laxman.up.railway.app/stripe/cc={card}"
+HIT_LOG_GROUP_ID          = -1004329967819
+EXTRA_CHARGED_GROUP_ID = -0
+STRIPE_GATE_API_URL       = "https://cardx.up.railway.app/stripe/cc={card}"
+
 MAX_CONCURRENT_CARDS      = 10
 CARD_TIMEOUT_SECONDS      = 300
 PROGRESS_UPDATE_INTERVAL  = 5.0
@@ -262,7 +263,7 @@ def _kb_running(sid: str, live: int, checked: int) -> RawMarkup:
             _btn(f"Live ({live})",   cb=f"mstr:{sid}:live", style="success", icon=BTN_LIVE_EMOJI_ID),
             _btn(f"All ({checked})", cb=f"mstr:{sid}:all",  style="primary", icon=BTN_ALL_EMOJI_ID),
         ],
-        [_btn("⛔ Stop", cb=f"msts:{sid}", style="danger", icon=BTN_STOP_EMOJI_ID)],
+        [_btn("Stop", cb=f"msts:{sid}", style="danger", icon=BTN_STOP_EMOJI_ID)],
     ])
 
 def _kb_done(sid: str, live: int, total: int) -> RawMarkup:
@@ -319,9 +320,10 @@ async def _update_progress(bot, sid: str, force: bool = False):
               if running else _kb_done(sid, sess["live"], sess["checked"]))
         await _RL_PROG.wait()
         try:
+            plain_text, entities = html_to_entities(text)
             await bot.edit_message_text(
                 chat_id=sess["chat_id"], message_id=sess["msg_id"],
-                text=text, parse_mode="HTML", reply_markup=kb,
+                text=plain_text, entities=entities, reply_markup=kb,
                 disable_web_page_preview=True,
             )
             sess["last_txt"] = text
@@ -769,8 +771,9 @@ async def cmd_mst(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f'<tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji></b>'
     )
 
+    init_plain, init_entities = html_to_entities(init_text)
     prog_msg = await msg.reply_text(
-        init_text, parse_mode="HTML",
+        init_plain, entities=init_entities,
         reply_markup=_kb_running(sid, 0, 0),
         disable_web_page_preview=True,
     )
