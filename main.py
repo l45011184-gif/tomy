@@ -823,7 +823,8 @@ MANUAL_PLANS = {
     "pay15": {"name": "Elite", "plan": "ELITE", "days": 15, "price": 14.00},
     "pay30": {"name": "Root", "plan": "ROOT", "days": 30, "price": 27.00},
 }
-OWNER_CONTACT_URL = f"tg://user?id={OWNER_ID}"
+OWNER_CONTACT_USERNAME = "@Batmancardchk"
+OWNER_CONTACT_URL = "https://t.me/Batmancardchk"
 
 
 def kb_price() -> RawMarkup:
@@ -4127,7 +4128,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>💎 Choose Your Premium Plan</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "Select a plan, then contact the owner for manual payment and activation.\n\n"
-            f"<b>Owner ID:</b> <code>{OWNER_ID}</code>"
+            f"<b>Contact:</b> {OWNER_CONTACT_USERNAME}"
         )
         await query.message.edit_text(txt, parse_mode="HTML", reply_markup=kb_price())
         return
@@ -4264,7 +4265,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>Result Files</b> ➳ Private delivery\n"
             "<b>Premium Gates</b> ➳ Full access\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Owner ID</b> ➳ <code>{OWNER_ID}</code>\n\n"
+            f"<b>Contact</b> ➳ {OWNER_CONTACT_USERNAME}\n\n"
             "Contact the owner, send the selected plan name, and ask for payment details. "
             "The owner will activate premium after confirming payment.",
             parse_mode="HTML",
