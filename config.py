@@ -15,7 +15,7 @@ from telegram import TelegramObject
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 🔑  BOT CREDENTIALS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8982650378:AAFk3IGn8toVeguEosYKXeOTr49K86cciwM")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8768705386:AAEZctPbO7LRd0QTcMHhb_UsPjQN4biOeog")
 OWNER_ID  = int(os.environ.get("OWNER_ID", "5502877086"))  # @lucifer2600
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -59,7 +59,6 @@ FORCE_CHANNELS = [
 # ⚙️  GENERAL SETTINGS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 API_TIMEOUT      = 240
-REFERRAL_CREDITS = 150
 LOCK_FILE        = "/tmp/batman_bot.lock"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
