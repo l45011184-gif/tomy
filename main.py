@@ -8,11 +8,9 @@ import os
 import sys
 import fcntl
 import json
-import hmac
-import hashlib
 import re
 import uuid
-from urllib.parse import quote
+import copy
 from io import BytesIO
 from html import escape
 from typing import Optional
@@ -30,7 +28,6 @@ from telegram.request import HTTPXRequest
 import aiohttp as _aiohttp
 
 import database as db   # PostgreSQL premium persistence (Railway)
-import payments
 
 try:
     from mst import (
@@ -45,7 +42,7 @@ from config import (
     BOT_TOKEN, OWNER_ID, VERSION, DEV_LINK,
     CHANNEL_USERNAME, CHANNEL_ID, CHANNEL_LINK, GROUP_USERNAME, GROUP_LINK, SUPPORT_LINK,
     BOT_LINK, BOT_USERNAME,
-    API_TIMEOUT, REFERRAL_CREDITS, LOCK_FILE,
+    API_TIMEOUT, LOCK_FILE,
     GATE_URLS, GATE_SITES, PREMIUM_GATES, FORCE_CHANNELS,
     get_bin_info, kb_result,
     tg_emoji, get_plan_emoji_id, get_random_live_emoji,
@@ -112,6 +109,7 @@ def _is_admin(user_id: int) -> bool:
 # File path can be absolute to a mounted volume on Railway.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PREMIUM_FILE = os.environ.get("PREMIUM_FILE", "premium_users.json")
+_PREMIUM_SAVE_LOCK = asyncio.Lock()
 
 def _save_premium_file(bot_data: dict) -> None:
     """Persist all active (non-expired) premium users to PREMIUM_FILE (JSON backup).
@@ -132,8 +130,7 @@ def _save_premium_file(bot_data: dict) -> None:
                 "granted_at":   ud.get("granted_at", 0),
             }
     try:
-        with open(PREMIUM_FILE, "w", encoding="utf-8") as f:
-            json.dump(premium, f, indent=2)
+        _write_json_atomic(PREMIUM_FILE, premium)
         logger.info(f"[PREMIUM] JSON backup: {len(premium)} user(s) → {PREMIUM_FILE}")
     except Exception as exc:
         logger.warning(f"[PREMIUM] JSON save failed: {exc}")
@@ -143,8 +140,21 @@ async def _save_premium(bot_data: dict) -> None:
     """Save to JSON backup AND instantly write to Postgres.
     Call this (with await) after every plan grant or removal.
     The JSON write runs in a thread pool so it never blocks the event loop."""
-    await asyncio.to_thread(_save_premium_file, bot_data)          # JSON backup (non-blocking)
-    await db.save_all_now(bot_data.get("user_data", {}))           # Postgres instant save
+    async with _PREMIUM_SAVE_LOCK:
+        user_snapshot = copy.deepcopy(bot_data.get("user_data", {}))
+        snapshot = {"user_data": user_snapshot}
+        await asyncio.to_thread(_save_premium_file, snapshot)
+        await db.save_all_now(user_snapshot)
+    runtime_bot = bot_data.get("_runtime_bot")
+    if runtime_bot:
+        try:
+            await _send_remote_backup(
+                runtime_bot,
+                bot_data,
+                reason="Premium membership changed",
+            )
+        except Exception as exc:
+            logger.warning("[BACKUP] Premium-change remote backup failed: %s", exc)
 
 
 def _load_premium_file(bot_data: dict) -> None:
@@ -268,13 +278,16 @@ def B(text: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_styled_plan(raw_plan: str) -> str:
     p = raw_plan.upper()
+    if p == "LITE":  return B("Lite")
     if p == "CORE":  return B("Core")
     if p == "ELITE": return B("Elite")
     if p == "ROOT":  return B("Root")
     return B("Trial")
 
 def get_plan_icon(raw_plan: str) -> str:
-    return "👑" if raw_plan.upper() in ("CORE", "ELITE", "ROOT") else ""
+    return "⚡" if raw_plan.upper() == "LITE" else (
+        "👑" if raw_plan.upper() in ("CORE", "ELITE", "ROOT") else ""
+    )
 
 def get_user_data(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> dict:
     uid = str(user_id)
@@ -285,8 +298,8 @@ def get_user_data(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> dict:
             "name": "User", "first_name": "User", "last_name": "", "username": "",
             "language_code": "en", "joined": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "last_active": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "credits": 150, "plan": "TRIAL", "expires": 0, "pre_premium_credits": 0,
-            "total_refs": 0, "total_checks": 0, "approved_checks": 0, "declined_checks": 0,
+            "plan": "TRIAL", "expires": 0,
+            "total_checks": 0, "approved_checks": 0, "declined_checks": 0,
             "last_gate": "N/A", "last_card": "N/A", "codes_redeemed": 0, "keys_redeemed": 0,
             "banned": False, "total_charged": 0,
             "daily_activity": {}, "daily_check_date": "", "daily_checks": 0,
@@ -304,23 +317,12 @@ def _update_user_meta(ud: dict, user) -> None:
     if getattr(user, "language_code", None): ud["language_code"] = user.language_code
 
 def is_user_premium(ud: dict) -> bool:
-    """Returns True if the user has an active (non-expired) premium plan.
-
-    Side-effects on expiry:
-      • plan  → "TRIAL"
-      • credits → restored to pre_premium_credits (what they had before buying)
-      • pre_premium_credits → 0
-    Premium users NEVER have credits deducted — they get unlimited checks.
-    """
+    """Return True only while the user has an active paid plan."""
     raw_plan = ud.get("plan", "TRIAL").upper()
     is_prem  = raw_plan != "TRIAL"
     if is_prem and ud.get("expires", 0) <= time.time():
-        # Premium expired — restore saved credits
-        saved = ud.get("pre_premium_credits", 0)
-        ud["plan"]                = "TRIAL"
-        ud["credits"]             = max(saved, 0)   # never go negative
-        ud["expires"]             = 0
-        ud["pre_premium_credits"] = 0
+        ud["plan"]    = "TRIAL"
+        ud["expires"] = 0
         return False
     return is_prem
 
@@ -345,54 +347,6 @@ def gen_receipt() -> str:
     return f"Batamanchk{random.randint(100000, 999999)}-CHK"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SECURE REFERRAL  — HMAC-signed tokens (no forgery)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_REF_SECRET: bytes = BOT_TOKEN.encode("utf-8")
-
-def _ref_token(user_id: int) -> str:
-    """Generate a short HMAC-SHA256 token for user_id.
-    Format: {user_id}_{16-char hex signature}
-    Anyone who guesses/modifies the user_id will get a bad signature."""
-    msg = str(user_id).encode("utf-8")
-    sig = hmac.new(_REF_SECRET, msg, hashlib.sha256).hexdigest()[:16]
-    return f"{user_id}_{sig}"
-
-def _verify_ref_token(token: str):
-    """Return referrer_id (int) if the token is authentic, else None."""
-    try:
-        uid_str, sig = token.rsplit("_", 1)
-        uid = int(uid_str)
-        expected = hmac.new(_REF_SECRET, str(uid).encode("utf-8"), hashlib.sha256).hexdigest()[:16]
-        if hmac.compare_digest(sig, expected):
-            return uid
-    except Exception:
-        pass
-    return None
-
-def get_referral_link(user_id: int) -> str:
-    return f"https://t.me/{BOT_USERNAME}?start=ref_{_ref_token(user_id)}"
-
-
-def kb_referral(user_id: int) -> RawMarkup:
-    referral_code = _ref_token(user_id)
-    referral_link = get_referral_link(user_id)
-    share_text = (
-        "Join BatCardChk for bot tools, updates, and community support.\n\n"
-        f"Bot: {BOT_LINK}\n"
-        f"Channel: {CHANNEL_LINK}\n"
-        f"Referral code: {referral_code}"
-    )
-    share_url = (
-        "https://t.me/share/url"
-        f"?url={quote(referral_link, safe='')}"
-        f"&text={quote(share_text, safe='')}"
-    )
-    return RawMarkup([
-        [_btn(B("Invite Friends"), url=share_url, style="primary")],
-        [_btn(B("Back"), cb="bmain", style="danger")],
-    ])
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # UI — USER CONTROL HUB  (/start)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def ui_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -403,12 +357,10 @@ def ui_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
     if raw_plan != "TRIAL" and expires <= now:
         raw_plan = "TRIAL"; ud["plan"] = "TRIAL"; ud["expires"] = 0; expires = 0
     premium      = raw_plan != "TRIAL"
-    credits      = "Unlimited" if premium else str(ud.get("credits", 150))
     plan_emoji   = tg_emoji(get_plan_emoji_id(raw_plan), "⭐")
     uname        = escape(f"@{user.username}" if user.username else user.first_name or "User")
     joined       = ud.get("joined", datetime.now().strftime("%Y-%m-%d")).split(" ")[0]
     last_active  = ud.get("last_active", "N/A")
-    total_refs   = ud.get("total_refs", 0)
     total_checks = ud.get("total_checks", 0)
     ban_status   = f"{E_ERRORS} {B('Banned')}" if ud.get("banned", False) else f"{E_LIVE} {B('Active')}"
 
@@ -427,13 +379,11 @@ def ui_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"✰ <b>{B('User ID')}</b>   ➔ <code>{user.id}</code>",
         f"✰ <b>{B('Access')}</b>    ➔ {get_styled_plan(raw_plan)}",
         f"✰ <b>{B('Status')}</b>    ➔ {ban_status}",
-        f"✰ <b>{B('Credits')}</b>   ➔ {credits}",
         f"✰ <b>{B('Joined')}</b>    ➔ {joined}",
         expire_line,
         "━━━━━━━━━━━━━━━━━━━━",
         f"✰ <b>{B('Last Active')}</b> ➔ {last_active}",
         f"✰ <b>{B('Total Checks')}</b> ➔ {total_checks}",
-        f"✰ <b>{B('Referrals')}</b>  ➔ {total_refs} (+{total_refs * REFERRAL_CREDITS} {B('credits')})",
         "━━━━━━━━━━━━━━━━━━━━",
         f"{E_DEV} {B('Version')} ➔ {VERSION}  |  <a href='{DEV_LINK}'>{B('Batamanchk')}</a> {E_PRO}",
     ]
@@ -450,12 +400,10 @@ def ui_full_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
     if raw_plan != "TRIAL" and expires <= now:
         raw_plan = "TRIAL"; ud["plan"] = "TRIAL"; ud["expires"] = 0; expires = 0
     premium       = raw_plan != "TRIAL"
-    credits       = "Unlimited" if premium else str(ud.get("credits", 150))
     plan_emoji    = tg_emoji(get_plan_emoji_id(raw_plan), "⭐")
     uname         = escape(f"@{user.username}" if user.username else user.first_name or "User")
     joined        = ud.get("joined", "N/A")
     last_active   = ud.get("last_active", "N/A")
-    total_refs    = ud.get("total_refs", 0)
     today_str     = datetime.now().strftime("%Y-%m-%d")
     today_count   = ud.get("daily_checks", 0) if ud.get("daily_check_date") == today_str else 0
     memberships   = len(ud.get("memberships", {}))
@@ -490,7 +438,6 @@ def ui_full_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"✰ <b>{B('User ID')}</b>   ➔ <code>{user.id}</code>",
         f"✰ <b>{B('Access')}</b>    ➔ {get_styled_plan(raw_plan)}",
         f"✰ <b>{B('Status')}</b>    ➔ {ban_status}",
-        f"✰ <b>{B('Credits')}</b>   ➔ {credits}",
         f"✰ <b>{B('Joined')}</b>    ➔ {joined}",
         expire_line,
         "━━━━━━━━━━━━━━━━━━━━",
@@ -504,7 +451,6 @@ def ui_full_profile(user, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"✰ <b>{B('Last Gate')}</b>   ➔ {last_gate}",
         f"✰ <b>{B('Last BIN')}</b>    ➔ <code>{last_card}</code>",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"✰ <b>{B('Referrals')}</b>   ➔ {total_refs} (+{total_refs * REFERRAL_CREDITS} {B('credits')})",
         f"✰ <b>{B('Codes')}</b>      ➔ {codes_red} {B('redeemed')}",
         f"✰ <b>{B('Keys')}</b>       ➔ {keys_red} {B('redeemed')}",
     ]
@@ -857,8 +803,7 @@ def kb_main(user_id: int) -> RawMarkup:
     return RawMarkup([
         [_btn(B("Checker"),  cb="mgates",    style="primary"),
          _btn(B("Buy Now"),  cb="mprice",    style="primary")],
-        [_btn(B("Referral"), cb="mreferral", style="primary"),
-         _btn(B("Profile"),  cb="mprofile",  style="primary")],
+        [_btn(B("Profile"),  cb="mprofile",  style="primary")],
     ])
 
 def kb_back(cb: str) -> RawMarkup:
@@ -871,41 +816,37 @@ def kb_profile() -> RawMarkup:
         [_btn(B("Back"), cb="bmain", style="primary")],
     ])
 
+
+MANUAL_PLANS = {
+    "pay2": {"name": "Lite", "plan": "LITE", "days": 2, "price": 4.00},
+    "pay10": {"name": "Core", "plan": "CORE", "days": 7, "price": 8.00},
+    "pay15": {"name": "Elite", "plan": "ELITE", "days": 15, "price": 14.00},
+    "pay30": {"name": "Root", "plan": "ROOT", "days": 30, "price": 27.00},
+}
+OWNER_CONTACT_URL = f"tg://user?id={OWNER_ID}"
+
+
 def kb_price() -> RawMarkup:
     return RawMarkup([
-        [_btn(B("Core $1.50 — 1 Day"), cb="pay1d", style="primary")],
+        [_btn(B("Lite ⚡ — 2 Days — $4"), cb="pay2", style="primary")],
         [_btn(B("Core $8 — 7 Days"), cb="pay10", style="primary")],
-        [_btn(B("Elite $12 — 15 Days"), cb="pay15", style="primary")],
-        [_btn(B("Root $25 — 30 Days"), cb="pay30", style="primary")],
+        [_btn(B("Elite $14 — 15 Days"), cb="pay15", style="primary")],
+        [_btn(B("Root $27 — 30 Days"), cb="pay30", style="primary")],
         [_btn(B("BACK"),          cb="bmain")],
     ])
 
 def kb_payment() -> RawMarkup:
     return RawMarkup([
-        [_btn(B("CONTACT SUPPORT"), url=SUPPORT_LINK, style="primary")],
+        [_btn(B("CONTACT OWNER"), url=OWNER_CONTACT_URL, style="primary")],
         [_btn(B("BACK"), cb="mprice")],
     ])
 
 
-def kb_crypto_methods(
-    plan_key: str,
-    method_keys: list[str] | None = None,
-) -> RawMarkup:
-    def coin(method_key: str) -> dict:
-        method = payments.PAYMENT_METHODS[method_key]
-        return _btn(
-            B(method["label"]),
-            cb=f"wlpay:{plan_key}:{method_key}",
-            style="primary",
-        )
-
-    available = method_keys if method_keys is not None else list(payments.PAYMENT_METHODS)
-    rows = [
-        [coin(key) for key in available[index:index + 2]]
-        for index in range(0, len(available), 2)
-    ]
-    rows.append([_btn(B("BACK"), cb="mprice")])
-    return RawMarkup(rows)
+def kb_manual_purchase() -> RawMarkup:
+    return RawMarkup([
+        [_btn(B("CONTACT OWNER FOR PAYMENT"), url=OWNER_CONTACT_URL, style="primary")],
+        [_btn(B("BACK TO PLANS"), cb="mprice")],
+    ])
 
 def kb_gate_main() -> RawMarkup:
     return RawMarkup([
@@ -1062,35 +1003,6 @@ def kb_cmd_nav(page: int) -> RawMarkup:
     ])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# REFERRAL SYSTEM
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def process_referral(new_user_id: int, referrer_id: int,
-                            context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if new_user_id == referrer_id: return False
-    referred_set = context.bot_data.setdefault("referred_users", set())
-    if new_user_id in referred_set: return False
-    referrer_ud = context.bot_data.get("user_data", {}).get(str(referrer_id))
-    if referrer_ud is None: return False
-    referred_set.add(new_user_id)
-    referrer_ud["credits"]    = referrer_ud.get("credits", 0) + REFERRAL_CREDITS
-    referrer_ud["total_refs"] = referrer_ud.get("total_refs", 0) + 1
-    try:
-        await context.bot.send_message(
-            chat_id=referrer_id,
-            text=(
-                f"<b>{E_LIVE} {B('Referral Bonus')}</b>\n──────────\n"
-                f"Someone joined via your link!\n"
-                f"<b>Credits Added</b>   ➳ +{REFERRAL_CREDITS}\n"
-                f"<b>Total Referrals</b> ➳ {referrer_ud['total_refs']}\n"
-                "──────────"
-            ),
-            parse_mode="HTML",
-        )
-    except Exception:
-        pass
-    return True
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # GATE PROCESSING  (single checks)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def _api_request(session, url: str, card: str, site: str) -> dict:
@@ -1126,7 +1038,7 @@ async def process_gate(update: Update, context: ContextTypes.DEFAULT_TYPE,
     premium = is_user_premium(ud)
     _update_user_meta(ud, user)
 
-    if gate_key in PREMIUM_GATES and not premium:
+    if not premium and not _is_admin(user.id):
         await update.message.reply_text(
             f"<b>{E_PRO} {B('Premium Only')}</b>\n──────────\nUse /buy to upgrade.",
             parse_mode="HTML", reply_markup=kb_upgrade()
@@ -1144,37 +1056,6 @@ async def process_gate(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"<b>Usage:</b> <code>/{gate_key} cc|mm|yy|cvv</code>", parse_mode="HTML"
         )
         return
-
-    if not premium:
-        credits = ud.get("credits", 0)
-        if credits <= 0:
-            # Out of credits — invite to upgrade, don't hard-block the UI
-            await update.message.reply_text(
-                f"<b>{E_PRO} {B('Credits Used Up!')}</b>\n──────────\n"
-                f"You've used all your free credits.\n\n"
-                f"<b>💎 Upgrade to Premium</b> for:\n"
-                f"• Unlimited checks — no credit limit\n"
-                f"• No cooldowns\n"
-                f"• Mass checking without daily caps\n"
-                f"──────────\n"
-                f"Tap <b>Buy Now</b> below to get a plan.",
-                reply_markup=kb_upgrade(), parse_mode="HTML"
-            )
-            return
-
-        remaining = get_cooldown_remaining(user.id, context)
-        if remaining > 0:
-            await update.message.reply_text(
-                f"<b>{E_ERRORS} {B('Cooldown')}</b>\n──────────\n"
-                f"Please wait <b>{remaining:.1f}s</b> before your next check.\n\n"
-                f"{E_PRO} <b>Premium removes all cooldowns.</b>\n"
-                "──────────",
-                reply_markup=kb_cooldown(), parse_mode="HTML"
-            )
-            return
-
-        set_cooldown(user.id, context)
-        ud["credits"] = credits - 1   # deduct 1 credit per single check
 
     api_url  = context.bot_data.get(f"gate_url_{gate_key}") or GATE_URLS.get(gate_key, "")
     site_url = GATE_SITES.get(gate_key, "example.com")
@@ -1239,7 +1120,6 @@ async def process_gate(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
 
     except asyncio.TimeoutError:
-        if not premium: ud["credits"] = ud.get("credits", 0) + 1
         time_taken = f"{time.time() - start_time:.2f}"
         text = build_check_result(
             card_raw=card_raw, gate_name=gate_name,
@@ -1252,7 +1132,6 @@ async def process_gate(update: Update, context: ContextTypes.DEFAULT_TYPE,
             disable_web_page_preview=True
         )
     except Exception as e:
-        if not premium: ud["credits"] = ud.get("credits", 0) + 1
         logger.error(f"Gate [{gate_key}] error: {e}")
         time_taken = f"{time.time() - start_time:.2f}"
         text = build_check_result(
@@ -1385,47 +1264,6 @@ async def send_activation_msg(user_id: int, plan: str, days: int,
     return receipt
 
 
-async def _activate_oxapay_plan(app: Application, order: dict) -> None:
-    """Sync an atomically committed paid entitlement and notify its user."""
-    user_id = int(order["user_id"])
-    plan = str(order["plan"]).upper()
-    days = int(order["days"])
-    order_id = str(order["order_id"])
-    ud = get_user_data(user_id, app)
-    now = time.time()
-    if ud.get("plan", "TRIAL").upper() == "TRIAL":
-        ud["pre_premium_credits"] = ud.get("credits", 150)
-    expires_ts = float(order["expires"])
-    ud["plan"] = plan
-    ud["expires"] = expires_ts
-    ud["last_receipt"] = order_id
-    ud["granted_at"] = now
-    await asyncio.to_thread(_save_premium_file, app.bot_data)
-
-    plan_emoji = tg_emoji(get_plan_emoji_id(plan), "⭐")
-    exp_date = datetime.fromtimestamp(expires_ts).strftime("%Y-%m-%d %H:%M")
-    try:
-        await app.bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"<b>{E_LIVE} {B('Payment Confirmed')}</b>\n"
-                "──────────\n"
-                f"<b>Access</b>  ➳ {get_styled_plan(plan)} {plan_emoji}\n"
-                f"<b>Days</b>    ➳ {days}\n"
-                f"<b>Credits</b> ➳ Unlimited\n"
-                f"<b>Expires</b> ➳ {exp_date}\n"
-                f"<b>Receipt</b> ➳ <code>{escape(order_id)}</code>\n"
-                "──────────\n"
-                "Your plan was activated automatically."
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        logger.warning(
-            "[OXAPAY] Plan committed for %s but notification failed: %s",
-            user_id, exc,
-        )
-
 async def resolve_user(target: str, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
     target = target.strip().lstrip("@")
     if target.lstrip("-").isdigit(): return int(target)
@@ -1484,7 +1322,7 @@ async def cmd_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Premium Key:</b>\n"
             f"<code>/gen key &lt;PLAN&gt; &lt;days&gt;</code>\n"
             f"<code>/gen key &lt;PLAN&gt; &lt;days&gt; &lt;count&gt;</code>\n\n"
-            f"<b>Plans:</b>  CORE | ELITE | ROOT\n\n"
+            f"<b>Plans:</b>  LITE | CORE | ELITE | ROOT\n\n"
             f"<b>Examples:</b>\n"
             f"<code>/gen code 50</code>\n"
             f"<code>/gen code 100 5</code>\n"
@@ -1555,9 +1393,9 @@ async def cmd_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         plan_arg = context.args[1].upper()
-        if plan_arg not in ("CORE", "ELITE", "ROOT"):
+        if plan_arg not in ("LITE", "CORE", "ELITE", "ROOT"):
             await update.message.reply_text(
-                f"<b>{E_ERRORS} Invalid plan.</b> Use: <b>CORE</b>, <b>ELITE</b>, or <b>ROOT</b>",
+                f"<b>{E_ERRORS} Invalid plan.</b> Use: <b>LITE</b>, <b>CORE</b>, <b>ELITE</b>, or <b>ROOT</b>",
                 parse_mode="HTML"
             )
             return
@@ -1737,7 +1575,7 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Usage:</b>\n"
             f"<code>/add @username PLAN DAYS</code>\n"
             f"<code>/add UserID PLAN DAYS</code>\n\n"
-            f"<b>Plans:</b>  CORE | ELITE | ROOT\n\n"
+            f"<b>Plans:</b>  LITE | CORE | ELITE | ROOT\n\n"
             f"<b>Example:</b>\n"
             f"<code>/add @john ELITE 30</code>\n"
             f"<code>/add 123456789 ROOT 7</code>\n"
@@ -1755,9 +1593,9 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     plan_arg = context.args[1].upper()
-    if plan_arg not in ("CORE", "ELITE", "ROOT"):
+    if plan_arg not in ("LITE", "CORE", "ELITE", "ROOT"):
         await update.message.reply_text(
-            f"{E_ERRORS} Invalid plan. Use: <b>CORE</b>, <b>ELITE</b>, or <b>ROOT</b>",
+            f"{E_ERRORS} Invalid plan. Use: <b>LITE</b>, <b>CORE</b>, <b>ELITE</b>, or <b>ROOT</b>",
             parse_mode="HTML"
         )
         return
@@ -1784,6 +1622,7 @@ async def cmd_rem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ud = get_user_data(target, context)
     ud["plan"] = "TRIAL"; ud["expires"] = 0
+    await db.save_user_now(target, ud)
     await _save_premium(context.bot_data)
     await update.message.reply_text(
         f"<b>{E_DECLINED} Premium removed for <code>{target}</code>.</b>", parse_mode="HTML"
@@ -1968,6 +1807,7 @@ async def cmd_resub(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ud["plan"]    = "TRIAL"
     ud["expires"] = 0
+    await db.save_user_now(target_id, ud)
     await _save_premium(context.bot_data)
 
     uname_d      = f"@{target_uname}" if target_uname else f"<code>{target_id}</code>"
@@ -2114,6 +1954,11 @@ async def _broadcast_worker(bot, status_msg, user_ids: list,
                 except Exception:
                     pass
                 last_report = cur_done
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     except Exception:
         pass
 
@@ -2141,10 +1986,6 @@ async def _broadcast_worker(bot, status_msg, user_ids: list,
         )
     except Exception:
         pass
-
-    # Release lock so a new broadcast can start
-    if _broadcast_lock.locked():
-        _broadcast_lock.release()
 
     logging.info(
         f"[broad] Done — total={total} sent={fs} blocked={fb} failed={ff}"
@@ -2230,7 +2071,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
-        asyncio.create_task(
+        broadcast_task = asyncio.create_task(
             _broadcast_worker(
                 context.bot, status_msg, user_ids,
                 context.bot_data, broadcast_id,
@@ -2238,6 +2079,22 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text=text,
             )
         )
+        context.bot_data["_broadcast_task"] = broadcast_task
+
+        def _broadcast_done(task: asyncio.Task) -> None:
+            if context.bot_data.get("_broadcast_task") is task:
+                context.bot_data.pop("_broadcast_task", None)
+                if _broadcast_lock.locked():
+                    _broadcast_lock.release()
+            if not task.cancelled():
+                exc = task.exception()
+                if exc:
+                    logging.error(
+                        "[broad] background worker crashed: %s",
+                        exc,
+                    )
+
+        broadcast_task.add_done_callback(_broadcast_done)
 
     except Exception as e:
         if _broadcast_lock.locked():
@@ -3304,16 +3161,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ud   = get_user_data(user.id, context)
     ud.setdefault("joined", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    ud.setdefault("total_refs", 0)
     _update_user_meta(ud, user)
-
-    if context.args:
-        arg = context.args[0]
-        if arg.startswith("ref_"):
-            # Secure HMAC token verification — prevents fake referral links
-            referrer_id = _verify_ref_token(arg[4:])
-            if referrer_id:
-                await process_referral(user.id, referrer_id, context)
 
     if ud.get("banned", False) and not _is_admin(user.id):
         await update.message.reply_text(
@@ -3326,6 +3174,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     not_joined = await check_force_sub(user.id, context)
     if not_joined:
         await update.message.reply_text(_force_join_text(not_joined), parse_mode="HTML", reply_markup=kb_force_sub(not_joined))
+        return
+
+    if not is_user_premium(ud) and not _is_admin(user.id):
+        await update.message.reply_text(
+            f"<b>{E_PRO} {B('Premium Access Required')}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "This bot is available only to users with an active premium plan.\n\n"
+            "Buy a premium plan first, then all bot features will unlock automatically.",
+            parse_mode="HTML",
+            reply_markup=kb_upgrade(),
+        )
         return
 
     await _send_as_media(
@@ -3362,7 +3221,15 @@ async def cmd_msh(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ud        = get_user_data(user.id, context)
     premium   = is_user_premium(ud)
-    is_trial  = not premium and not _is_admin(user.id)
+    if not premium and not _is_admin(user.id):
+        await update.message.reply_text(
+            f"<b>{E_PRO} {B('Premium Access Required')}</b>\n"
+            "Buy and activate a premium plan before using this bot.",
+            parse_mode="HTML",
+            reply_markup=kb_upgrade(),
+        )
+        return
+    is_trial  = False
     today_str = datetime.now().strftime("%Y-%m-%d")
     _update_user_meta(ud, user)
     plan      = ud.get("plan", "TRIAL")
@@ -3503,10 +3370,13 @@ async def cmd_msh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess["msg_id"] = msg.message_id
 
     # ── Fire mass batch in the background ───────────────────────────
-    asyncio.create_task(
+    mass_task = asyncio.create_task(
         run_mass_batch(context.bot, sid, valid_cards, user, plan, sites, proxies,
                        bot_data=context.bot_data)
     )
+    active_mass = context.bot_data.setdefault("_active_mass_tasks", set())
+    active_mass.add(mass_task)
+    mass_task.add_done_callback(active_mass.discard)
 
     # ── Deduct trial credits ────────────────────────────────────────
     if is_trial:
@@ -3724,36 +3594,14 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(txt, reply_markup=kb_price(), parse_mode="HTML")
 
-async def cmd_refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_not_banned(update, context): return
-    if not await require_membership(update, context): return
-    user       = update.effective_user
-    ud         = get_user_data(user.id, context)
-    link       = get_referral_link(user.id)
-    total_refs = ud.get("total_refs", 0)
-    txt = (
-        f"<b>{E_USER} {B('Referral')}</b>\n──────────\n"
-        f"<b>Link</b>      ➳ <code>{link}</code>\n──────────\n"
-        f"<b>Referrals</b> ➳ {total_refs}\n"
-        f"<b>Earned</b>    ➳ {total_refs * REFERRAL_CREDITS} credits\n"
-        f"<b>Per Ref</b>   ➳ +{REFERRAL_CREDITS} credits\n──────────\n"
-        "Share your link to earn free credits!"
-    )
-    await update.message.reply_text(
-        txt, parse_mode="HTML",
-        reply_markup=kb_referral(user.id),
-        disable_web_page_preview=True,
-    )
-
 async def cmd_rm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_not_banned(update, context): return
     if not await require_membership(update, context): return
     if not context.args:
         await update.message.reply_text(
-            f"<b>{E_CARD} {B('Redeem Code / Key')}</b>\n──────────\n"
-            f"<b>Usage:</b> <code>/rm CODE</code>\n\n"
-            f"Redeem a <b>credit code</b> to top up your balance,\n"
-            f"or a <b>premium key</b> to activate a plan.\n"
+            f"<b>{E_CARD} {B('Redeem Premium Key')}</b>\n──────────\n"
+            f"<b>Usage:</b> <code>/rm KEY</code>\n\n"
+            f"Redeem a <b>premium key</b> to activate bot access.\n"
             f"──────────",
             parse_mode="HTML"
         )
@@ -3761,30 +3609,7 @@ async def cmd_rm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code  = context.args[0].upper().strip()
     uid   = update.effective_user.id
     ud    = get_user_data(uid, context)
-    codes = context.bot_data.get("codes", {})
     keys  = context.bot_data.get("keys",  {})
-
-    if code in codes:
-        if codes[code]["used"]:
-            await update.message.reply_text(
-                f"<b>{E_ERRORS} Code Already Used</b>\n──────────\n"
-                f"This code has already been redeemed.\n──────────",
-                parse_mode="HTML"
-            )
-            return
-        value              = codes[code]["value"]
-        codes[code]["used"] = True
-        ud["credits"]       = ud.get("credits", 0) + value
-        ud["codes_redeemed"] = ud.get("codes_redeemed", 0) + 1
-        await update.message.reply_text(
-            f"<b>{E_LIVE} {B('Code Redeemed')}</b>\n──────────\n"
-            f"<b>Code</b>           ➳ <code>{code}</code>\n"
-            f"<b>Credits Added</b>  ➳ +{value}\n"
-            f"<b>New Balance</b>    ➳ {ud['credits']}\n"
-            "──────────",
-            parse_mode="HTML"
-        )
-        return
 
     if code in keys:
         if keys[code]["used"]:
@@ -3803,8 +3628,6 @@ async def cmd_rm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "hours" in keys[code]:
             hours      = keys[code]["hours"]
             expires_ts = time.time() + hours * 3600
-            if ud.get("plan", "TRIAL").upper() == "TRIAL":
-                ud["pre_premium_credits"] = ud.get("credits", 150)
             ud["plan"]         = p.upper()
             ud["expires"]      = expires_ts
             receipt            = gen_receipt()
@@ -4159,8 +3982,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data.startswith("find_sub_")  or
         data.startswith("fb_ok_")     or   # _fb_approve handles its own answer
         data.startswith("fb_no_")     or   # _fb_decline handles its own answer
-        data in payments.PLANS         or   # answers before OxaPay network request
-        data.startswith("wlpay:")      or   # answers before OxaPay network request
+        data in MANUAL_PLANS           or   # manual purchase plan details
         data in ("hide_on", "hide_off")
     )
     if not _self_answering:
@@ -4195,6 +4017,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         ud = get_user_data(user.id, context)
         _update_user_meta(ud, user)
+        if not is_user_premium(ud) and not _is_admin(user.id):
+            await _send_custom_html(
+                context.bot,
+                user.id,
+                f"<b>{E_PRO} {B('Premium Access Required')}</b>\n"
+                "Buy and activate a premium plan before using this bot.",
+                reply_markup=kb_upgrade(),
+                disable_web_page_preview=True,
+            )
+            return
         await _send_custom_html(
             context.bot, user.id, ui_start_screen(user, context),
             reply_markup=kb_main(user.id),
@@ -4203,25 +4035,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "bmain":
+        ud = get_user_data(user.id, context)
+        if not is_user_premium(ud) and not _is_admin(user.id):
+            await _edit_custom_html(
+                query.message,
+                f"<b>{E_PRO} {B('Premium Access Required')}</b>\n"
+                "Buy and activate a premium plan before using this bot.",
+                reply_markup=kb_upgrade(),
+                disable_web_page_preview=True,
+            )
+            return
         await _edit_custom_html(
             query.message, ui_start_screen(user, context),
             reply_markup=kb_main(user.id), disable_web_page_preview=True
-        )
-        return
-    if data == "mreferral":
-        ud_r       = get_user_data(user.id, context)
-        link       = get_referral_link(user.id)
-        total_refs = ud_r.get("total_refs", 0)
-        await _edit_custom_html(
-            query.message,
-            f"<b>{E_USER} {B('Referral Program')}</b>\n──────────\n"
-            f"<b>Link</b>      ➳ <code>{link}</code>\n──────────\n"
-            f"<b>Referrals</b> ➳ {total_refs}\n"
-            f"<b>Earned</b>    ➳ {total_refs * REFERRAL_CREDITS} credits\n"
-            f"<b>Per Ref</b>   ➳ +{REFERRAL_CREDITS} credits\n──────────\n"
-            "Share your link to earn free credits!",
-            reply_markup=kb_referral(user.id),
-            disable_web_page_preview=True,
         )
         return
     if data == "mprofile":
@@ -4252,7 +4078,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>/me</b> ➳ My charged stats\n"
             "<b>/status</b> ➳ Leaderboard\n"
             "<b>/hide</b> ➳ Identity privacy\n"
-            "<b>/refer</b> ➳ Referral link\n"
             "<b>/rm</b> ➳ Redeem code or key\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<b>Tools</b>\n"
@@ -4298,7 +4123,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     if data == "mprice":
-        txt = "<b>Choose a plan to proceed with secure crypto payment</b>"
+        txt = (
+            "<b>💎 Choose Your Premium Plan</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "Select a plan, then contact the owner for manual payment and activation.\n\n"
+            f"<b>Owner ID:</b> <code>{OWNER_ID}</code>"
+        )
         await query.message.edit_text(txt, parse_mode="HTML", reply_markup=kb_price())
         return
 
@@ -4420,89 +4250,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    if data in payments.PLANS:
-        await query.answer("Loading available payment methods…", show_alert=False)
-        plan = payments.PLANS[data]
-        plan_emoji = tg_emoji(get_plan_emoji_id(plan["plan"]), "⭐")
-        try:
-            accepted_methods = await payments.get_accepted_method_keys(force=True)
-        except Exception as exc:
-            logger.error("[OXAPAY] Could not load accepted currencies: %s", exc)
-            await query.message.edit_text(
-                f"<b>{E_ERRORS} {B('Payment Methods Unavailable')}</b>\n"
-                "──────────\n"
-                f"{B('The payment service is temporarily unavailable.')} "
-                f"{B('Please try again.')}",
-                parse_mode="HTML",
-                reply_markup=kb_payment(),
-            )
-            return
-        if not accepted_methods:
-            await query.message.edit_text(
-                f"<b>{E_ERRORS} No Payment Methods Enabled</b>\n"
-                "──────────\n"
-                "Enable at least one supported cryptocurrency in your "
-                "payment service settings.",
-                parse_mode="HTML",
-                reply_markup=kb_payment(),
-            )
-            return
+    if data in MANUAL_PLANS:
+        await query.answer("Opening manual purchase details…", show_alert=False)
+        plan = MANUAL_PLANS[data]
+        plan_emoji = "⚡" if plan["plan"] == "LITE" else "💎"
         await query.message.edit_text(
-            f"<b>{plan_emoji} {B(plan['name'])} Plan</b>\n"
+            f"<b>{plan_emoji} {B(plan['name'])} Premium</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
             f"<b>Price</b> ➳ ${plan['price']:.2f}\n"
             f"<b>Duration</b> ➳ {plan['days']} Day{'s' if plan['days'] != 1 else ''}\n"
-            "<b>Credits</b> ➳ ∞\n"
-            "<b>Select Payment Method</b> ➳",
+            "<b>Checking</b> ➳ Unlimited\n"
+            "<b>Mass Checker</b> ➳ Included\n"
+            "<b>Result Files</b> ➳ Private delivery\n"
+            "<b>Premium Gates</b> ➳ Full access\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Owner ID</b> ➳ <code>{OWNER_ID}</code>\n\n"
+            "Contact the owner, send the selected plan name, and ask for payment details. "
+            "The owner will activate premium after confirming payment.",
             parse_mode="HTML",
-            reply_markup=kb_crypto_methods(data, accepted_methods),
-        )
-        return
-
-    if data.startswith("wlpay:"):
-        await query.answer("Creating secure payment address…", show_alert=False)
-        try:
-            _, plan_key, method_key = data.split(":", 2)
-            plan = payments.PLANS[plan_key]
-            payment = await payments.create_white_label_payment(
-                user.id, plan_key, method_key,
-            )
-        except Exception as exc:
-            logger.error("[OXAPAY] White-label payment creation failed: %s", exc)
-            await query.message.edit_text(
-                f"<b>{E_ERRORS} {B('Payment Address Unavailable')}</b>\n"
-                "──────────\n"
-                f"{B('The payment service is temporarily unavailable after automatic retries.')} "
-                f"{B('Please press Retry Payment.')}",
-                parse_mode="HTML",
-                reply_markup=RawMarkup([
-                    [_btn(B("RETRY PAYMENT"), cb=data, style="primary")],
-                    [_btn(B("SUPPORT"), url=SUPPORT_LINK, style="primary")],
-                    [_btn(B("BACK"), cb="mprice")],
-                ]),
-            )
-            return
-
-        plan_emoji = tg_emoji(get_plan_emoji_id(plan["plan"]), "⭐")
-        memo_line = ""
-        if payment["memo"]:
-            memo_line = f"\n<b>Memo/Tag</b> ➳ <code>{escape(payment['memo'])}</code>"
-        await query.message.edit_text(
-            f"<b>Plan</b> ➳ {B(plan['name'])} {plan_emoji}\n"
-            f"<b>Price</b> ➳ ${plan['price']:.2f} USD\n"
-            f"<b>Pay</b> ➳ {escape(payment['pay_amount'])} "
-            f"{escape(payment['pay_currency'])}\n"
-            f"<b>Network</b> ➳ {escape(payment['network_name'])}\n\n"
-            "<b>Address</b> ➳\n"
-            f"<code>{escape(payment['address'])}</code>"
-            f"{memo_line}\n\n"
-            f"<b>Expires in</b> ➳ {payment['lifetime']} min\n"
-            "<b>Status</b> ➳ ⏳ Waiting…\n\n"
-            "Send the exact amount using the selected network. "
-            "Your plan activates automatically after confirmation.",
-            parse_mode="HTML",
-            reply_markup=RawMarkup([
-                [_btn(B("SUPPORT"), url=SUPPORT_LINK, style="primary")],
-            ]),
+            reply_markup=kb_manual_purchase(),
             disable_web_page_preview=True,
         )
         return
@@ -4571,6 +4337,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             uid = int(data.split("_")[-1])
             ud  = get_user_data(uid, context)
             ud["plan"] = "TRIAL"; ud["expires"] = 0
+            await db.save_user_now(uid, ud)
             await _save_premium(context.bot_data)
             await query.answer(f"Premium removed for {uid}", show_alert=True)
             return
@@ -4595,6 +4362,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 STATE_FILE = os.environ.get("BOT_STATE_FILE", "bot_state.json")
 BACKUP_DIR = os.environ.get("BOT_BACKUP_DIR", "backups")
 MAX_BACKUP_BYTES = 10 * 1024 * 1024
+_STATE_SAVE_LOCK = asyncio.Lock()
 RAID_WINDOW_SECONDS = int(os.environ.get("RAID_WINDOW_SECONDS", "60"))
 RAID_JOIN_THRESHOLD = int(os.environ.get("RAID_JOIN_THRESHOLD", "12"))
 RAID_DURATION_SECONDS = int(os.environ.get("RAID_DURATION_SECONDS", "900"))
@@ -4648,9 +4416,50 @@ def _rotate_restore_points(bot_data: dict) -> None:
             os.unlink(os.path.join(BACKUP_DIR, old))
 
 
+async def _send_remote_backup(bot, bot_data: dict, reason: str) -> None:
+    """Send a restorable snapshot to the owner's Telegram DM."""
+    payload = copy.deepcopy(_state_payload(bot_data))
+    encoded = await asyncio.to_thread(
+        lambda: json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    )
+    if len(encoded) > MAX_BACKUP_BYTES:
+        raise ValueError(
+            f"backup is {len(encoded)} bytes; maximum is {MAX_BACKUP_BYTES}"
+        )
+
+    now = time.time()
+    premium_count = sum(
+        1
+        for data in payload.get("user_data", {}).values()
+        if data.get("plan", "TRIAL").upper() != "TRIAL"
+        and data.get("expires", 0) > now
+    )
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    document = BytesIO(encoded)
+    document.name = f"premium-safety-backup-{stamp}.json"
+    await bot.send_document(
+        chat_id=OWNER_ID,
+        document=document,
+        filename=document.name,
+        caption=(
+            f"🛡 <b>Off-server safety backup</b>\n"
+            f"<b>Reason:</b> {escape(reason)}\n"
+            f"<b>Active premium users:</b> <code>{premium_count}</code>\n\n"
+            "Keep this Telegram message. After moving the bot to a new server, "
+            "reply to this file with /restore."
+        ),
+        parse_mode="HTML",
+    )
+
+
 async def _automatic_backup(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await asyncio.to_thread(_rotate_restore_points, context.bot_data)
+        await _send_remote_backup(
+            context.bot,
+            context.bot_data,
+            reason="Daily automatic backup",
+        )
     except Exception as exc:
         logger.warning("Automatic backup rotation failed: %s", exc)
         try:
@@ -4684,7 +4493,9 @@ async def _maintenance_jobs_loop(app: Application) -> None:
 
 async def _save_state(bot_data: dict) -> None:
     try:
-        await asyncio.to_thread(_write_json_atomic, STATE_FILE, _state_payload(bot_data))
+        async with _STATE_SAVE_LOCK:
+            payload = copy.deepcopy(_state_payload(bot_data))
+            await asyncio.to_thread(_write_json_atomic, STATE_FILE, payload)
     except Exception as exc:
         logger.warning("State save failed: %s", exc)
 
@@ -5028,11 +4839,14 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     path = os.path.join(BACKUP_DIR, f"bot-backup-{stamp}.json")
     try:
         await asyncio.to_thread(_write_json_atomic, path, _state_payload(context.bot_data))
-        with open(path, "rb") as handle:
-            await update.effective_message.reply_document(
-                handle, filename=os.path.basename(path),
-                caption="✅ Versioned state backup (contains no bot configuration or secrets).",
-            )
+        await _send_remote_backup(
+            context.bot,
+            context.bot_data,
+            reason="Manual /backup command",
+        )
+        await update.effective_message.reply_text(
+            "✅ Backup created and sent privately to the primary owner."
+        )
     except Exception as exc:
         logger.warning("Backup failed: %s", exc)
         await update.effective_message.reply_text(f"❌ Backup failed: {escape(str(exc))}", parse_mode="HTML")
@@ -5093,7 +4907,12 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.bot_data["maintenance"] = bool(pending.get("maintenance", False))
         context.bot_data["bot_off"] = bool(pending.get("bot_off", False))
         await _save_state(context.bot_data)
-        await query.message.edit_text("✅ Restore completed. A pre-restore safety backup was saved.")
+        await _save_premium(context.bot_data)
+        await db.restore_premium_now(context.bot_data.get("user_data", {}))
+        await query.message.edit_text(
+            "✅ Restore completed. Premium users were written to the database "
+            "and a new off-server safety backup was sent to the owner."
+        )
     except Exception as exc:
         logger.warning("Restore failed: %s", exc)
         await query.message.edit_text(f"❌ Restore failed: {escape(str(exc))}", parse_mode="HTML")
@@ -5138,6 +4957,108 @@ async def maintenance_command_guard(update: Update, context: ContextTypes.DEFAUL
     raise ApplicationHandlerStop
 
 
+_UNPAID_COMMANDS = frozenset({"start", "buy", "sub", "rm"})
+_OWNER_ONLY_COMMANDS = frozenset({
+    "1day", "gen", "add", "rem", "find", "resub", "rsub",
+    "ban", "unban", "unmute", "user", "note", "clearnotes",
+    "broadcast", "bstatus", "backup", "restore", "botoff", "boton",
+    "info", "allcm", "allsub", "maintenance", "updatesites",
+    "onsh", "offsh", "onmsh", "offmsh", "hr", "hr1", "hr2", "hr3",
+    "dbstatus", "restart", "allchecking", "myid", "fakeon", "fakeoff",
+    "getid",
+})
+_OWNER_CALLBACK_PREFIXES = (
+    "owner_", "find_sub_", "br_", "restore_", "allchecking_", "fl_",
+    "fltog_", "flrem_", "flspd_", "flhide_", "ogs_", "fb_ok_", "fb_no_",
+)
+
+
+async def owner_command_guard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Deny owner commands before their individual handlers can run."""
+    user, message = update.effective_user, update.effective_message
+    if not user or not message:
+        return
+    text = (message.text or message.caption or "").lstrip()
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
+    if command not in _OWNER_ONLY_COMMANDS or _is_admin(user.id):
+        return
+    await message.reply_text("⛔ <b>Owner-only command.</b>", parse_mode="HTML")
+    raise ApplicationHandlerStop
+
+
+async def owner_callback_guard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Deny owner control buttons before any callback implementation runs."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    data = query.data or ""
+    if not data.startswith(_OWNER_CALLBACK_PREFIXES) or _is_admin(query.from_user.id):
+        return
+    await query.answer("Owner-only control.", show_alert=True)
+    raise ApplicationHandlerStop
+
+
+async def premium_command_guard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Allow unpaid users to purchase/activate premium, and block everything else."""
+    user, message = update.effective_user, update.effective_message
+    if not user or not message or _is_admin(user.id):
+        return
+
+    text = (message.text or message.caption or "").lstrip()
+    command = text.split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
+    if command in _UNPAID_COMMANDS:
+        return
+
+    ud = get_user_data(user.id, context)
+    if is_user_premium(ud):
+        return
+
+    await message.reply_text(
+        f"<b>{E_PRO} {B('Premium Access Required')}</b>\n"
+        "Buy and activate a premium plan before using this bot.",
+        parse_mode="HTML",
+        reply_markup=kb_upgrade(),
+    )
+    raise ApplicationHandlerStop
+
+
+async def premium_callback_guard(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Keep purchase and activation buttons available before premium is active."""
+    query = update.callback_query
+    if not query or not query.from_user or _is_admin(query.from_user.id):
+        return
+
+    ud = get_user_data(query.from_user.id, context)
+    if is_user_premium(ud):
+        return
+
+    data = query.data or ""
+    allowed = (
+        data in {"mprice", "bmain", "check_sub"}
+        or data in MANUAL_PLANS
+    )
+    if allowed:
+        return
+
+    await query.answer(
+        "Premium access required. Buy a plan first.",
+        show_alert=True,
+    )
+    raise ApplicationHandlerStop
+
+
 async def bot_off_callback_guard(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -5167,7 +5088,19 @@ async def _post_shutdown(app: Application) -> None:
             await maintenance_task
         except asyncio.CancelledError:
             pass
-    await payments.stop_webhook(app)
+    producer_tasks = [
+        task
+        for key in (_ACTIVE_SH_TASKS_KEY, "_active_mass_tasks")
+        for task in list(app.bot_data.get(key, set()))
+        if task and not task.done()
+    ]
+    broadcast_task = app.bot_data.get("_broadcast_task")
+    if broadcast_task and not broadcast_task.done():
+        producer_tasks.append(broadcast_task)
+    for task in producer_tasks:
+        task.cancel()
+    if producer_tasks:
+        await asyncio.gather(*producer_tasks, return_exceptions=True)
     await _save_state(app.bot_data)
     # ── CRITICAL: save all premium users to Postgres before exit ──────────
     # Passing app.bot_data ensures no data is lost on Railway redeploy.
@@ -5213,7 +5146,15 @@ async def _post_init(app: Application) -> None:
         )
     # ── Connect to Postgres & sync — all logic lives in database.py ────────
     await db.attach(app)
-    await payments.start_webhook(app, _activate_oxapay_plan)
+    app.bot_data["_runtime_bot"] = app.bot
+    try:
+        await _send_remote_backup(
+            app.bot,
+            app.bot_data,
+            reason="Bot startup snapshot",
+        )
+    except Exception as exc:
+        logger.warning("[BACKUP] Startup remote backup failed: %s", exc)
 
     # ── Startup DM to owner — confirms DB status so data loss is obvious ───
     try:
@@ -5360,22 +5301,17 @@ _FL_PRICES = [
 def _fl_log_msg(id_entry: dict) -> str:
     """Build a local test event without payment data or external checks."""
     price = random.choice(_FL_PRICES)
-    # Hidden IDs reveal neither their display name nor their Telegram link.
-    if id_entry.get("hide", False):
-        ulink = "Hidden User"
-    else:
-        safe_link = escape(str(id_entry.get("link", "")), quote=True)
-        safe_name = escape(str(id_entry.get("display", "User")))
-        ulink = f'<a href="{safe_link}">{safe_name}</a>' if safe_link else safe_name
+    raw_uid = str(id_entry.get("uid", "0000"))
+    masked_uid = raw_uid[:4] + ("*" * max(0, len(raw_uid) - 4))
     eid   = get_random_charged_emoji()
     return (
-        f'<b>HIT ➛ CHARGED '
-        f'<tg-emoji emoji-id="{eid}">💎</tg-emoji></b>\n'
-        f'<b>Gate ➛ Shopify • {price} USD</b>\n'
-        f'<b><tg-emoji emoji-id="{HIT_RESP_EMOJI_ID}">✅</tg-emoji>'
-        f' <code>ORDER_PAID</code></b>\n'
-        f'<b>User ➛ {ulink}'
-        f' <tg-emoji emoji-id="{PRO_EMOJI_ID}">⭐</tg-emoji></b>'
+        f'<b>🚨 NEW HIT! 🚨</b>\n'
+        f'<b>💰 CHARGED <tg-emoji emoji-id="{eid}">💎</tg-emoji></b>\n'
+        f'<b>➖➖➖➖➖➖➖➖➖</b>\n'
+        f'<b>🏪 Gate: Shopify</b>\n'
+        f'<b>💵 Amount: {price} USD</b>\n'
+        f'<b>🟢 Status: <code>ORDER_PAID</code></b>\n'
+        f'<b>👤 User: <code>{masked_uid}</code> ⭐</b>'
     )
 
 def _fl_get_ids(bd: dict) -> list:
@@ -6156,8 +6092,12 @@ def main():
         app.add_handler(MessageHandler(
             filters.COMMAND | filters.ChatType.PRIVATE,
             banned_update_guard,
-        ), group=-3)
-        app.add_handler(CallbackQueryHandler(banned_callback_guard), group=-3)
+        ), group=-5)
+        app.add_handler(CallbackQueryHandler(banned_callback_guard), group=-5)
+        app.add_handler(MessageHandler(filters.COMMAND, owner_command_guard), group=-4)
+        app.add_handler(CallbackQueryHandler(owner_callback_guard), group=-4)
+        app.add_handler(MessageHandler(filters.COMMAND, premium_command_guard), group=-3)
+        app.add_handler(CallbackQueryHandler(premium_callback_guard), group=-3)
         # Generic metadata tracking runs first and never consumes updates.
         app.add_handler(MessageHandler(filters.ALL, track_activity_and_spam), group=-1)
         # Must precede public command handlers so maintenance is explicit, not silent.
@@ -6177,7 +6117,6 @@ def main():
 
         app.add_handler(CommandHandler("buy",     cmd_plan))
         app.add_handler(CommandHandler("sub",     cmd_sub))
-        app.add_handler(CommandHandler("refer",   cmd_refer))
         app.add_handler(CommandHandler("rm",      cmd_rm))
         if get_bin_lookup_handler is not None:
             app.add_handler(get_bin_lookup_handler())
