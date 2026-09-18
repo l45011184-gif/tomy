@@ -21,6 +21,13 @@ from config import RawMarkup, _btn
 SECRET_SPLITTER_CHANNEL_ID = -1001234567890  # <--- REPLACE THIS WITH YOUR CHANNEL ID
 
 
+def _safe_file_prefix(name: str, fallback: str = "split") -> str:
+    """Create a safe, brand-free file prefix for generated split files."""
+    name = re.sub(r"\.txt$", "", name or "", flags=re.IGNORECASE)
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("._-")
+    return name[:64] or fallback
+
+
 def _extract_cards_splitter(text: str) -> list:
     patterns = [
         r'(\d{13,19})\s*[|/:=]\s*(\d{1,2})\s*[|/:=]\s*(\d{2,4})\s*[|/:=]\s*(\d{3,4})',
@@ -64,8 +71,10 @@ def _split_menu_kb(split_id: str) -> RawMarkup:
             _btn("5000 cards/file", cb=f"split_set_5000_{split_id}", style="success")
         ],
         [
-            _btn("✏️ Custom Amount", cb=f"split_custom_{split_id}", style="success"),
-            _btn("📝 Edit File Name", cb=f"split_name_{split_id}", style="success")
+            _btn("✏️ Custom Amount", cb=f"split_custom_{split_id}", style="success")
+        ],
+        [
+            _btn("📝 EDIT OUTPUT FILE NAME", cb=f"split_name_{split_id}", style="primary")
         ],
         [
             _btn("✅ Start Splitting", cb=f"split_start_{split_id}", style="primary"),
@@ -136,6 +145,7 @@ async def cmd_split(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         
     split_id = f"{user.id}_{int(time.time())}"
+    source_name = _safe_file_prefix(doc.file_name or "split")
     context.bot_data["split_sessions"] = context.bot_data.get("split_sessions", {})
     context.bot_data["split_sessions"][split_id] = {
         "cards": cards,
@@ -143,7 +153,7 @@ async def cmd_split(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "chat_id": msg.chat_id,
         "msg_id": 0,
         "chunk_size": 1000,
-        "file_name": "batcards_split",
+        "file_name": source_name,
         "state": None
     }
     
@@ -252,13 +262,11 @@ async def split_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 sent_count += 1
                 await asyncio.sleep(0.5)
             except Exception:
-                try:
-                    await context.bot.send_document(
-                        chat_id=chat_id,
-                        document=InputFile(buf, filename=fname),
-                        caption=f"📄 <b>Split File {sent_count+1}</b>\nContains <b>{len(chunk)}</b> cards.\n(Sent here because DM is blocked)"
-                    )
-                except: pass
+                await query.message.reply_text(
+                    "❌ I could not send the private result file. Open the bot in DM, press Start, and try again.",
+                    parse_mode="HTML",
+                )
+                break
                     
         sessions.pop(split_id, None)
         
@@ -269,11 +277,7 @@ async def split_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
         except:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ <b>Splitting Complete!</b>\n━━━━━━━━━━━━━━━━━━━━\nTotal Files Sent: <b>{sent_count}</b>\nTotal Cards: <b>{total_cards}</b>",
-                parse_mode="HTML"
-            )
+            pass
         return
 
     try:
@@ -327,12 +331,7 @@ async def split_message_capture(update: Update, context: ContextTypes.DEFAULT_TY
             raise ApplicationHandlerStop
             
     elif session["state"] == "awaiting_name":
-        name = msg.text.strip()
-        for char in ['/', '\\', '?', '%', '*', ':', '|', '"', '<', '>', '.']:
-            name = name.replace(char, "")
-        if not name:
-            name = "batcards_split"
-        session["file_name"] = name
+        session["file_name"] = _safe_file_prefix(msg.text, fallback="split")
         
     session["state"] = None
     
