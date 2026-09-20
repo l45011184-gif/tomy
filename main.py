@@ -4225,6 +4225,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "<b>Checker Commands</b>\n"
             "<b>/sh</b> ➳ Shopify Single Checker\n"
             "<b>/msh</b> ➳ Shopify Mass Checker\n"
+            "<b>/hit</b> ➳ Whop Checkout Checker (Free)\n"
+        
             "━━━━━━━━━━━━━━━━━━━━\n"
             "<b>Account Commands</b>\n"
             "<b>/start</b> ➳ Dashboard\n"
@@ -5112,7 +5114,7 @@ async def maintenance_command_guard(update: Update, context: ContextTypes.DEFAUL
     raise ApplicationHandlerStop
 
 
-_UNPAID_COMMANDS = frozenset({"start", "buy", "sub", "rm"})
+_UNPAID_COMMANDS = frozenset({"start", "buy", "sub", "rm", "hit"})
 _OWNER_ONLY_COMMANDS = frozenset({
     "1day", "gen", "add", "rem", "find", "resub", "rsub",
     "ban", "unban", "unmute", "user", "note", "clearnotes",
