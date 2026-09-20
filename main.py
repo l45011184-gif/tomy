@@ -73,10 +73,7 @@ from sh import (
     get_random_charged_emoji, HIT_RESP_EMOJI_ID, PRO_EMOJI_ID,
     CARD_CHK_BTN_EMOJI_ID, BOT_USERNAME_LINK,
 )
-from splitter import get_splitter_handlers
-
-if get_mst_live_emoji is None:
-    get_mst_live_emoji = get_random_live_emoji
+import database as db   # PostgreSQL premium persistence (Railway)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # WHOP API SAFE IMPORT
@@ -87,6 +84,19 @@ try:
 except Exception as e:
     print(f"CRITICAL ERROR: Failed to import 'whop_api.py': {e}")
     WHOP_LOADED = False
+
+try:
+    from mst import (
+        get_bin_handler as get_bin_lookup_handler,
+        get_random_live_emoji as get_mst_live_emoji,
+    )
+except ImportError:
+    get_bin_lookup_handler = None
+    get_mst_live_emoji = None
+
+from config import (
+    BOT_TOKEN, OWNER_ID, VERSION, DEV_LINK,
+    # ... keep all your original config imports here ...
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
