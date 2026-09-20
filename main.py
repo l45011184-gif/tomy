@@ -38,14 +38,6 @@ except ImportError:
     get_bin_lookup_handler = None
     get_mst_live_emoji = None
 
-# Safe import for Whop Checker
-try:
-    from whop_api import WhopCheckout, _parse_cc, _build_cfg
-    WHOP_LOADED = True
-except Exception as e:
-    print(f"CRITICAL ERROR: Failed to import 'whop_api.py': {e}")
-    WHOP_LOADED = False
-
 from config import (
     BOT_TOKEN, OWNER_ID, VERSION, DEV_LINK,
     CHANNEL_USERNAME, CHANNEL_ID, CHANNEL_LINK, GROUP_USERNAME, GROUP_LINK, SUPPORT_LINK,
@@ -2628,12 +2620,12 @@ async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         f"<b>👤 User panel</b>\n<b>Name:</b> {name}\n<b>Username:</b> {username}\n"
         f"<b>ID:</b> <code>{uid}</code>\n<b>Plan:</b> {escape(plan)}\n"
-        f"<b>Credits:</b> {'Unlimited' if plan != "TRIAL" else ud.get("credits", 150)}\n"
-        f"<b>Banned:</b> {'Yes' if ud.get("banned") else 'No'}\n<b>Referrals:</b> {ud.get("total_refs", 0)}\n"
-        f"<b>Last active:</b> {escape(str(ud.get("last_active", "N/A")))}\n"
+        f"<b>Credits:</b> {'Unlimited' if plan != 'TRIAL' else ud.get('credits', 150)}\n"
+        f"<b>Banned:</b> {'Yes' if ud.get('banned') else 'No'}\n<b>Referrals:</b> {ud.get('total_refs', 0)}\n"
+        f"<b>Last active:</b> {escape(str(ud.get('last_active', 'N/A')))}\n"
         f"<b>Recent activity:</b> {recent} updates / 7 days\n"
-        f"<b>Groups seen:</b> {len(memberships)}\n<b>Warnings by group:</b> {', '.join(warning_rows) or "None"}\n"
-        f"<b>Private notes:</b> {escape(" | ".join(notes[-5:])) or "None"}"
+        f"<b>Groups seen:</b> {len(memberships)}\n<b>Warnings by group:</b> {', '.join(warning_rows) or 'None'}\n"
+        f"<b>Private notes:</b> {escape(' | '.join(notes[-5:])) or 'None'}"
     )
     await update.effective_message.reply_text(text, parse_mode="HTML")
 
@@ -3511,7 +3503,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     divider = "────────────"
 
     lines = [
-        f"{CROWN} <b>Leaderboard</b> {DIAMOND>",
+        f"{CROWN} <b>Leaderboard</b> {DIAMOND}",
         divider,
     ]
 
