@@ -29,9 +29,6 @@ import aiohttp as _aiohttp
 
 import database as db   # PostgreSQL premium persistence (Railway)
 
-# ... more imports ...
-from config import (...)
-from sh import (...)
 from splitter import get_splitter_handlers
 
 try:
@@ -93,10 +90,6 @@ try:
 except ImportError:
     get_bin_lookup_handler = None
     get_mst_live_emoji = None
-
-from config import (
-    BOT_TOKEN, OWNER_ID, VERSION, DEV_LINK,
-    # ... keep all your original config imports here ...
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
@@ -6280,7 +6273,7 @@ def main():
         else:
             logger.warning("mst.py does not export get_bin_handler; /bin registration skipped.")
         app.add_handler(CommandHandler("fb",      cmd_fb))
-                app.add_handler(CommandHandler("sh",      _cmd_sh_gated))   # force-join gated
+        app.add_handler(CommandHandler("sh",      _cmd_sh_gated))   # force-join gated
         app.add_handler(CommandHandler("msh",     cmd_msh))
         app.add_handler(CommandHandler("hit",     cmd_hit))         # <--- ADD THIS LINE HERE
         app.add_handler(get_me_handler())                           # /me — lifetime charged stats
