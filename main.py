@@ -29,11 +29,6 @@ import aiohttp as _aiohttp
 
 import database as db   # PostgreSQL premium persistence (Railway)
 
-# ... more imports ...
-from config import (...)
-from sh import (...)
-from splitter import get_splitter_handlers
-
 try:
     from mst import (
         get_bin_handler as get_bin_lookup_handler,
@@ -79,22 +74,13 @@ if get_mst_live_emoji is None:
     get_mst_live_emoji = get_random_live_emoji
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# WHOP API SAFE IMPORT
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-try:
-    from whop_api import WhopCheckout, _parse_cc, _build_cfg
-    WHOP_LOADED = True
-except Exception as e:
-    print(f"CRITICAL ERROR: Failed to import 'whop_api.py': {e}")
-    WHOP_LOADED = False
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger  = logging.getLogger(__name__)
+
 
 async def _send_custom_html(bot, chat_id, html: str, **kwargs):
     return await bot.send_message(
